@@ -183,6 +183,27 @@ X0 will travel to negative X. This applies to new raster imports.
   (connection, firmware, laser commands, custom G-code, raster and jog defaults, safety
   options) and loads them back. GRBL's `$` settings stay on the machine.
 
+### Job menu: analysis and production
+
+- **Energy heatmap...** colours the job by laser energy per area (power × time over each
+  cell). Overlapping passes, slow corners and repeated lines show up red.
+- **Cost and time estimate...** prices the job from a machine rate per hour, the laser's
+  power draw and electricity price, material per m² (job size plus a margin), setup cost and
+  quantity. Rates are saved.
+- **Compare with file...** shows the loaded job and another G-code file side by side:
+  lines, burn and travel length and time, size, origin and highest S. It also overlays
+  both toolpaths.
+- **Nest on sheet...** lays the job's operations out in rows on a sheet without
+  overlapping. It can turn parts 90° and add copies of one operation. It packs bounding
+  boxes, and the result can be undone from the File menu.
+- **Serial number and QR code...** adds text or a QR code as its own operation. The
+  template takes `{n}` (a counter that goes up each time, with formats like `{n:0000}`),
+  `{date}` and `{time}`. QR codes use byte mode, versions 1–10 and error correction L, M, Q
+  or H, burned as filled lines per module.
+- **Rotary...** rescales Y for a roller or chuck rotary wired in place of the Y motor.
+  Enter the Y travel for one full turn and the roller or object diameter. Arcs become
+  short lines; reload the file to undo.
+
 ### Home before the first job
 
 With homing enabled (`$22=1`), **Grbl > Home before first job after connecting**

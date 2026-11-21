@@ -808,6 +808,13 @@ namespace LaserGRBL
 			RiseOnFileLoaded(filename, elapsed);
 		}
 
+		/// <summary>Adds generated G-code (a marking, a nested copy) as a new operation after the current job.</summary>
+		internal void AppendGeneratedOperation(JobOperation operation)
+		{
+			if (CheckInUse()) return;
+			InstallGeneratedOperation(operation, operation.Name, list.Count > 0);
+		}
+
 		internal void LoadCalibrationPattern(string filename, List<GrblCommand> commands)
 		{
 			if (CheckInUse()) return;

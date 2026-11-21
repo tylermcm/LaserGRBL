@@ -199,6 +199,7 @@ namespace LaserGRBL
 			IconsMgr.PrepareMenuItem(shakeTestToolStripMenuItem, "mdi-pulse");
 			AddCalibrationMenuItems();
 			AddWorkflowMenuItems();
+			AddJobMenu();
 			var homeFirst = new ToolStripMenuItem("Home before first job after connecting") { CheckOnClick = true, Checked = GrblCore.HomeBeforeFirstRun,
 				ToolTipText = "When homing ($22) is enabled, run $H before the first job unless the machine was homed since it connected." };
 			homeFirst.CheckedChanged += (sender, args) => GrblCore.HomeBeforeFirstRun = homeFirst.Checked;
@@ -1282,6 +1283,25 @@ namespace LaserGRBL
 				redo.Text = redo.Enabled ? "Redo " + Core.OperationHistory.RedoName.ToLowerInvariant() : "Redo operation change";
 				queue.Text = JobQueue.Items.Count > 0 ? string.Format("Job queue ({0})...", JobQueue.Items.Count) : "Job queue...";
 			};
+		}
+
+		private void AddJobMenu()
+		{
+			var job = new ToolStripMenuItem("Job");
+			var heatmap = new ToolStripMenuItem("Energy heatmap...", null, (sender, args) => RunSafely(() => HeatmapForm.ShowFor(this, Core)));
+			var cost = new ToolStripMenuItem("Cost and time estimate...", null, (sender, args) => RunSafely(() => CostForm.ShowFor(this, Core)));
+			var compare = new ToolStripMenuItem("Compare with file...", null, (sender, args) => RunSafely(() => CompareForm.ShowFor(this, Core)));
+			var nest = new ToolStripMenuItem("Nest on sheet...", null, (sender, args) => RunSafely(() => NestForm.ShowFor(this, Core)));
+			var marking = new ToolStripMenuItem("Serial number and QR code...", null, (sender, args) => RunSafely(() => MarkingForm.ShowFor(this, Core)));
+			var rotary = new ToolStripMenuItem("Rotary...", null, (sender, args) => RunSafely(() => RotaryForm.ShowFor(this, Core)));
+			job.DropDownItems.AddRange(new ToolStripItem[] { heatmap, cost, compare, new ToolStripSeparator(), nest, marking, rotary });
+			job.DropDownOpening += (sender, args) =>
+			{
+				bool loaded = Core.HasProgram;
+				heatmap.Enabled = cost.Enabled = compare.Enabled = rotary.Enabled = loaded;
+				nest.Enabled = loaded && Core.HasJobOperations;
+			};
+			MMn.Items.Insert(Math.Max(0, MMn.Items.IndexOf(questionMarkToolStripMenuItem)), job);
 		}
 
 		private void ReportRebuild(Exception error)

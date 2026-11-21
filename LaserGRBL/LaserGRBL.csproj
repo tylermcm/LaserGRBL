@@ -869,6 +869,9 @@
     <Compile Include="Core\JobPlacement.cs" />
     <Compile Include="Core\JobTimeline.cs" />
     <Compile Include="JobOperationsEditor.cs" />
+    <Compile Include="WorkflowForms.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ToolpathForms.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -879,6 +882,8 @@
     <Compile Include="Core\CalibrationPatterns.cs" />
     <Compile Include="Core\KerfCompensation.cs" />
     <Compile Include="Core\ContourToolpath.cs" />
+    <Compile Include="Core\JobSafety.cs" />
+    <Compile Include="Core\JobWorkflow.cs" />
     <Compile Include="JobPlaybackView.cs" />
     <Compile Include="JobPlacementView.cs" />
     <Compile Include="CameraView.cs" />

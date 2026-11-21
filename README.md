@@ -161,6 +161,28 @@ end outside the image with the laser off. The head is then at full speed across 
 whole image, so the edges don't come out darker. Leave room beside the image: one placed at
 X0 will travel to negative X. This applies to new raster imports.
 
+### Before, during and between jobs
+
+- **Grbl > Check before starting** (on by default) looks over each new job before it
+  runs. It flags a job bigger than the work area (`$130`/`$131`), power above `$30`,
+  laser mode (`$32`) off, Z moves, negative coordinates with no work origin, and an
+  alarm. You can still start anyway.
+- **Grbl > Frame job...** traces the rectangle around everything the job burns, with
+  the laser off or at a faint power capped at 10% of `$30`.
+- **Resume after a crash.** While a job runs, its progress is saved to `checkpoint.txt`
+  in the LaserGRBL data folder every two seconds. If LaserGRBL closes, the PC loses
+  power or the connection drops, load the same file and press Run: LaserGRBL offers to
+  resume 20 lines before the last confirmed one, homing first and restoring the work
+  origin when needed. Progress is matched to the exact file contents, so an edited or
+  different file never resumes, and it is cleared when the job finishes.
+- **File > Job queue...** lists files to run in order. When a job finishes, LaserGRBL
+  offers to load the next one; it never starts it, so you can swap the material.
+- **File > Undo/Redo operation change** steps back through edits to operations,
+  placement, toolpath options and materials. Loading another file clears the history.
+- **File > Machine presets...** saves this machine's LaserGRBL settings under a name
+  (connection, firmware, laser commands, custom G-code, raster and jog defaults, safety
+  options) and loads them back. GRBL's `$` settings stay on the machine.
+
 ### Home before the first job
 
 With homing enabled (`$22=1`), **Grbl > Home before first job after connecting**

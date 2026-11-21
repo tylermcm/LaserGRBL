@@ -293,6 +293,14 @@ namespace LaserGRBL
 		private GPoint mMPos;
 		private GPoint mWCO;
 		private bool mHomedSinceConnect;
+		private ulong mCheckpointSignature;
+		private long mCheckpointSaved;
+		private UndoHistory<JobOperation.Saved[]> mOperationHistory;
+		private GPoint? mResumeWco; // work origin to restore on the next resume, from a saved checkpoint
+		internal UndoHistory<JobOperation.Saved[]> OperationHistory
+		{ get { return mOperationHistory ?? (mOperationHistory = new UndoHistory<JobOperation.Saved[]>()); } }
+		/// <summary>Raised once when a whole job finishes, after the last pass; not for each repeat.</summary>
+		public event Action OnJobCompleted;
 		private int mGrblBlocks = -1;
 		private int mGrblBuffer = -1;
 		private int mFailedConnection = 0;
@@ -650,6 +658,7 @@ namespace LaserGRBL
 		void RiseOnFileLoaded(long elapsed, string filename)
 		{
 			mTP.Reset(true);
+			if (!mRebuildingRaster) OperationHistory.Clear(); // a new file; rebuilding operations also lands here
 			if (mJobPassPlan != null)
 			{
 				mJobPassPlan = null;
@@ -1355,6 +1364,8 @@ namespace LaserGRBL
 					if ((mTP.Executed == 0 && !mPassSequenceStarted) || mTP.Executed == mTP.Target) //never started or fully completed
 					{
 						bool home;
+						if (OfferCheckpointResume(parent)) return;
+						if (!ConfirmPreflight(parent)) return;
 						if (ConfirmHomeBeforeRun(parent, out home))
 							RunProgramFromStart(home, true);
 					}
@@ -1454,6 +1465,130 @@ namespace LaserGRBL
 			return true;
 		}
 
+		internal PreflightInput BuildPreflightInput()
+		{
+			var input = new PreflightInput { Lines = file.Count, InAlarm = MachineStatus == MacStatus.Alarm, HasWorkOffset = mWCO != GPoint.Zero, Homed = mHomedSinceConnect };
+			var range = file.Range.DrawingRange;
+			if (range.ValidRange)
+			{
+				input.HasBounds = true;
+				input.MinX = range.X.Min; input.MaxX = range.X.Max;
+				input.MinY = range.Y.Min; input.MaxY = range.Y.Max;
+			}
+			try
+			{
+				input.BedWidth = Configuration.TableWidth;
+				input.BedHeight = Configuration.TableHeight;
+				input.MaxPwm = Configuration.MaxPWM;
+				input.LaserMode = Configuration.LaserMode;
+				// The home-before-first-job option already handles homing, so only mention it when that is off.
+				input.HomingEnabled = Configuration.HomingEnabled && !HomeBeforeFirstRun;
+			}
+			catch (Exception) { } // configuration not read yet: skip the machine checks
+			decimal maxS;
+			bool usesZ;
+			PreflightCheck.Scan(file, out maxS, out usesZ);
+			input.MaxS = maxS;
+			input.UsesZ = usesZ;
+			return input;
+		}
+
+		private bool ConfirmPreflight(Form parent)
+		{
+			if (!PreflightCheck.Enabled) return true;
+			var findings = PreflightCheck.Run(BuildPreflightInput());
+			if (findings.Count == 0) return true;
+			bool error = findings.Any(f => f.Severity == PreflightSeverity.Error);
+			var answer = MessageBox.Show(parent,
+				string.Join(Environment.NewLine + Environment.NewLine, findings.Select(f => f.ToString())) + Environment.NewLine + Environment.NewLine + "Start anyway?",
+				error ? "Check before starting: problems found" : "Check before starting", MessageBoxButtons.YesNo,
+				error ? MessageBoxIcon.Error : MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+			return answer == DialogResult.Yes;
+		}
+
+		/// <summary>Traces the job's outline with the laser off (or at the framing power) so you can check where it lands.</summary>
+		internal void FrameJob()
+		{
+			if (!CanSendFile) throw new InvalidOperationException("Connect, load a job and wait until the machine is idle to frame it.");
+			var range = file.Range.DrawingRange;
+			if (!range.ValidRange) throw new InvalidOperationException("This job doesn't burn anything to frame.");
+			decimal maxPwm = 1000;
+			try { maxPwm = Configuration.MaxPWM; } catch (Exception) { }
+			foreach (var line in Framing.Commands(range.X.Min, range.Y.Min, range.X.Max, range.Y.Max, Framing.Feed, Framing.Power, maxPwm))
+				EnqueueCommand(new GrblCommand(line));
+		}
+
+		/// <summary>Line of the file reached. A fresh run also counts the $H and header lines queued ahead of the file.</summary>
+		private int CheckpointPosition
+		{
+			get { return mTP.Executed - Math.Max(0, mTP.Target - file.Count); }
+		}
+
+		private void StartCheckpoint(bool clear)
+		{
+			try
+			{
+				mCheckpointSignature = JobCheckpoint.Sign(file);
+				mCheckpointSaved = 0;
+				if (clear) JobCheckpoint.Clear(JobCheckpoint.DefaultPath);
+			}
+			catch (Exception ex) { Logger.LogException("Checkpoint", ex); mCheckpointSignature = 0; }
+		}
+
+		private void SaveCheckpoint()
+		{
+			if (mCheckpointSignature == 0 || !mTP.InProgram) return;
+			long now = Tools.HiResTimer.TotalMilliseconds;
+			if (now - mCheckpointSaved < 2000) return;
+			mCheckpointSaved = now;
+			var wco = mTP.LastKnownWCO != GPoint.Zero ? mTP.LastKnownWCO : mWCO;
+			try
+			{
+				new JobCheckpoint
+				{
+					Name = Settings.GetObject<string>("Core.LastOpenFile", null),
+					Signature = mCheckpointSignature, Lines = file.Count, Executed = CheckpointPosition,
+					PassIndex = mPassIndex, LoopCount = (int)LoopCount,
+					WcoX = wco.X, WcoY = wco.Y, WcoZ = wco.Z, Saved = DateTime.Now
+				}.Save(JobCheckpoint.DefaultPath);
+			}
+			catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException) { }
+		}
+
+		/// <summary>Offers to resume this file from progress saved by a run that never finished. True when the click was handled.</summary>
+		private bool OfferCheckpointResume(Form parent)
+		{
+			var checkpoint = JobCheckpoint.Load(JobCheckpoint.DefaultPath);
+			if (checkpoint == null || !checkpoint.Matches(JobCheckpoint.Sign(file), file.Count)) return false;
+			bool homing = false;
+			try { homing = Configuration.HomingEnabled && !mHomedSinceConnect; } catch (Exception) { }
+			bool setwco = checkpoint.HasWorkOffset && mWCO == GPoint.Zero;
+			int line = checkpoint.ResumeLine;
+			string nl = Environment.NewLine;
+			var answer = MessageBox.Show(parent, string.Format(System.Globalization.CultureInfo.CurrentCulture,
+				"This job stopped before it finished ({0:g}), after about line {1:N0} of {2:N0}." + nl + nl +
+				"Yes: resume from line {3:N0}. The last few lines run again so nothing is skipped.{4}{5}" + nl +
+				"No: forget it and start from the beginning." + nl + "Cancel: don't start." + nl + nl +
+				"Only resume if the material hasn't moved.",
+				checkpoint.Saved, checkpoint.Executed, checkpoint.Lines, line + 1,
+				homing ? " The machine homes first." : "",
+				setwco ? " The work origin from that run is restored." : ""),
+				"Resume interrupted job?", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+			if (answer == DialogResult.Cancel) return true;
+			if (answer == DialogResult.No) { JobCheckpoint.Clear(JobCheckpoint.DefaultPath); return false; }
+			if (mJobPassPlan != null)
+			{
+				mPassIndex = Math.Max(0, Math.Min(mJobPassPlan.Count - 1, checkpoint.PassIndex));
+				mPassSequenceStarted = true;
+			}
+			if (checkpoint.LoopCount >= 1) LoopCount = checkpoint.LoopCount;
+			if (homing) mHomedSinceConnect = true;
+			mResumeWco = new GPoint(checkpoint.WcoX, checkpoint.WcoY, checkpoint.WcoZ);
+			try { ContinueProgramFromKnown(line, homing, setwco); }
+			finally { mResumeWco = null; }
+			return true;
+		}
+
 		private void UserWantToContinue(Form parent)
 		{
 			bool setwco = mWCO == GPoint.Zero && mTP.LastKnownWCO != GPoint.Zero;
@@ -1498,6 +1633,7 @@ namespace LaserGRBL
 					mQueuePtr.Enqueue(cmd.CloneForPass(CurrentPassSettings));
 
 				mTP.JobStart(LoadedFile, mQueuePtr, first);
+				if (first) StartCheckpoint(true);
 				Logger.LogMessage("EnqueueProgram", "Running program, {0} lines", file.Count);
 			}
 		}
@@ -1542,7 +1678,7 @@ namespace LaserGRBL
 				{
 					//compute current point and set offset
 					GPoint pos = homing ? GPoint.Zero : MachinePosition;
-					GPoint wco = mTP.LastKnownWCO;
+					GPoint wco = mResumeWco ?? mTP.LastKnownWCO;
 					GPoint cur = pos - wco;
 					mQueue.Enqueue(new GrblCommand(String.Format("G92 X{0} Y{1} Z{2}", cur.X.ToString(System.Globalization.CultureInfo.InvariantCulture), cur.Y.ToString(System.Globalization.CultureInfo.InvariantCulture), cur.Z.ToString(System.Globalization.CultureInfo.InvariantCulture))));
 				}
@@ -1555,6 +1691,7 @@ namespace LaserGRBL
 				mQueuePtr.Enqueue(new GrblCommand(spb.GetSettledModals()));
 
 				mTP.JobContinue(LoadedFile, position, mQueuePtr.Count);
+				StartCheckpoint(false);
 
 				for (int i = position; i < file.Count; i++) //enqueue remaining commands
 				{
@@ -2888,7 +3025,10 @@ namespace LaserGRBL
 					mUsedBuffer = Math.Max(0, mUsedBuffer - pending.SerialData.Length);
 
 					if (mTP.InProgram && pending.RepeatCount == 0) //solo se non è una ripetizione aggiorna il tempo
+					{
 						mTP.JobExecuted(pending.TimeOffset);
+						SaveCheckpoint();
+					}
 
 					if (mTP.InProgram && pending.Status == GrblCommand.CommandStatus.ResponseBad)
 						mTP.JobError(); //incrementa il contatore
@@ -3098,6 +3238,9 @@ namespace LaserGRBL
                 OnProgramEnded?.Invoke();
                 OnJobEnd();
 				mPassSequenceStarted = false;
+				mCheckpointSignature = 0;
+				JobCheckpoint.Clear(JobCheckpoint.DefaultPath);
+				OnJobCompleted?.Invoke();
 
 				SoundEvent.PlaySound(SoundEvent.EventId.Success);
 
@@ -3193,8 +3336,42 @@ namespace LaserGRBL
 
 		internal void RebuildOperations(IList<JobOperation> operations, Action<Exception> completed)
 		{
+			RebuildOperations(operations, completed, "Edit operations", true);
+		}
+
+		private JobOperation.Saved[] SnapshotOperations()
+		{
+			return file.Operations.Select(operation => new JobOperation.Saved(operation)).ToArray();
+		}
+
+		/// <summary>Goes back to the operations before the last change: settings, placement, toolpath or material.</summary>
+		internal void UndoOperations(Action<Exception> completed)
+		{
+			if (!HasJobOperations || !OperationHistory.CanUndo) return;
+			var previous = OperationHistory.Undo(SnapshotOperations());
+			RebuildOperations(previous.Select(saved => saved.Restore()).ToList(), error =>
+			{
+				if (error != null) OperationHistory.Redo(previous); // put the history back the way it was
+				completed(error);
+			}, null, false);
+		}
+
+		internal void RedoOperations(Action<Exception> completed)
+		{
+			if (!HasJobOperations || !OperationHistory.CanRedo) return;
+			var next = OperationHistory.Redo(SnapshotOperations());
+			RebuildOperations(next.Select(saved => saved.Restore()).ToList(), error =>
+			{
+				if (error != null) OperationHistory.Undo(next);
+				completed(error);
+			}, null, false);
+		}
+
+		private void RebuildOperations(IList<JobOperation> operations, Action<Exception> completed, string change, bool record)
+		{
 			if (!CanConfigurePasses || !HasJobOperations)
 				throw new InvalidOperationException("Stop the job before editing operations.");
+			var before = record ? SnapshotOperations() : null;
 
 			var worker = new System.ComponentModel.BackgroundWorker();
 			worker.DoWork += (sender, args) => args.Result = file.BuildOperations(operations);
@@ -3203,7 +3380,11 @@ namespace LaserGRBL
 				var error = args.Error;
 				try
 				{
-					if (error == null) file.ApplyOperations((GrblFile)args.Result);
+					if (error == null)
+					{
+						file.ApplyOperations((GrblFile)args.Result);
+						if (before != null) OperationHistory.Record(change, before);
+					}
 				}
 				catch (Exception ex) { error = ex; }
 				finally

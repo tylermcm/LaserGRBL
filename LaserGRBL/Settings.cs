@@ -193,6 +193,12 @@ namespace LaserGRBL
             }
         }
 
+        /// <summary>The stored value whatever its type, or null.</summary>
+        internal static object GetRaw(string key)
+        {
+            return ExistObject(key) ? dic[key] : null;
+        }
+
         internal static bool ExistObject(string key)
         {
             return dic.ContainsKey(key);

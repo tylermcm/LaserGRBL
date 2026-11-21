@@ -111,6 +111,7 @@ namespace LaserGRBL
 
 			Core.MachineStatusChanged += OnMachineStatus;
 			Core.OnFileLoaded += OnFileLoaded;
+			Core.OnJobCompleted += () => { if (IsHandleCreated) BeginInvoke(new Action(() => JobQueueForm.OfferNext(this, Core))); };
 			Core.OnOverrideChange += RefreshOverride;
 			Core.IssueDetected += OnIssueDetected;
 
@@ -197,6 +198,7 @@ namespace LaserGRBL
 			IconsMgr.PrepareMenuItem(MnAccuracyTest, "mdi-details");
 			IconsMgr.PrepareMenuItem(shakeTestToolStripMenuItem, "mdi-pulse");
 			AddCalibrationMenuItems();
+			AddWorkflowMenuItems();
 			var homeFirst = new ToolStripMenuItem("Home before first job after connecting") { CheckOnClick = true, Checked = GrblCore.HomeBeforeFirstRun,
 				ToolTipText = "When homing ($22) is enabled, run $H before the first job unless the machine was homed since it connected." };
 			homeFirst.CheckedChanged += (sender, args) => GrblCore.HomeBeforeFirstRun = homeFirst.Checked;
@@ -1249,6 +1251,49 @@ namespace LaserGRBL
 			{
 				using (var form = new RecordTestResultForm()) form.ShowDialog(this);
 			}));
+		}
+
+		private void AddWorkflowMenuItems()
+		{
+			int index = MnGrbl.DropDownItems.IndexOf(MnUnlock) + 1;
+			MnGrbl.DropDownItems.Insert(index, new ToolStripMenuItem("Frame job...", null, (sender, args) => RunSafely(() => FramingForm.ShowFor(this, Core)))
+				{ ToolTipText = "Trace the rectangle around the job with the laser off, to check where it lands." });
+			var preflight = new ToolStripMenuItem("Check before starting") { CheckOnClick = true, Checked = PreflightCheck.Enabled,
+				ToolTipText = "Before each new job, check the job fits the work area, power is within $30, laser mode is on, and the machine isn't in alarm." };
+			preflight.CheckedChanged += (sender, args) => PreflightCheck.Enabled = preflight.Checked;
+			MnGrbl.DropDownItems.Insert(index + 1, preflight);
+
+			var undo = new ToolStripMenuItem("Undo operation change", null, (sender, args) => RunSafely(() => Core.UndoOperations(ReportRebuild)));
+			var redo = new ToolStripMenuItem("Redo operation change", null, (sender, args) => RunSafely(() => Core.RedoOperations(ReportRebuild)));
+			var queue = new ToolStripMenuItem("Job queue...", null, (sender, args) => JobQueueForm.ShowFor(this, Core));
+			var presets = new ToolStripMenuItem("Machine presets...", null, (sender, args) => MachinePresetsForm.ShowFor(this));
+			int at = fileToolStripMenuItem.DropDownItems.IndexOf(MnFileAppend) + 1;
+			fileToolStripMenuItem.DropDownItems.Insert(at, queue);
+			fileToolStripMenuItem.DropDownItems.Insert(at + 1, new ToolStripSeparator());
+			fileToolStripMenuItem.DropDownItems.Insert(at + 2, undo);
+			fileToolStripMenuItem.DropDownItems.Insert(at + 3, redo);
+			fileToolStripMenuItem.DropDownItems.Insert(at + 4, new ToolStripSeparator());
+			fileToolStripMenuItem.DropDownItems.Insert(at + 5, presets);
+			fileToolStripMenuItem.DropDownOpening += (sender, args) =>
+			{
+				undo.Enabled = Core.OperationHistory.CanUndo && Core.CanConfigurePasses;
+				redo.Enabled = Core.OperationHistory.CanRedo && Core.CanConfigurePasses;
+				undo.Text = undo.Enabled ? "Undo " + Core.OperationHistory.UndoName.ToLowerInvariant() : "Undo operation change";
+				redo.Text = redo.Enabled ? "Redo " + Core.OperationHistory.RedoName.ToLowerInvariant() : "Redo operation change";
+				queue.Text = JobQueue.Items.Count > 0 ? string.Format("Job queue ({0})...", JobQueue.Items.Count) : "Job queue...";
+			};
+		}
+
+		private void ReportRebuild(Exception error)
+		{
+			if (error != null) MessageBox.Show(this, error.Message, "Operations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+		}
+
+		private void RunSafely(Action action)
+		{
+			try { action(); }
+			catch (Exception ex) when (ex is InvalidOperationException || ex is ArgumentException)
+			{ MessageBox.Show(this, ex.Message, "LaserGRBL", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
 		}
 
 		private void GenerateFocusTest()

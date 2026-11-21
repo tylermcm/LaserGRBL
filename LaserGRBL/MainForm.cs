@@ -123,6 +123,7 @@ namespace LaserGRBL
 
 			AssignIcons();
 			RefreshColorSchema(); //include RefreshOverride();
+			ApplyModernShell();
 			RefreshFormTitle();
             //RefreshMenuHotKeys(); // I don't like the behaviour and the aspect, so I comment it out
         }
@@ -168,6 +169,7 @@ namespace LaserGRBL
 			PreviewForm.OnColorChange();
 			IconsMgr.OnColorChannge();
 			RefreshOverride();
+			ApplyShellColors();
 		}
 
 		private void AssignIcons()
@@ -466,6 +468,7 @@ namespace LaserGRBL
 			ConnectionForm.TimerUpdate();
 			PreviewForm.TimerUpdate();
 			JogForm.Enabled = Core.JogEnabled;
+			RefreshShell();
 			PromptForWiFi();
 		}
 
@@ -1302,6 +1305,16 @@ namespace LaserGRBL
 				nest.Enabled = loaded && Core.HasJobOperations;
 			};
 			MMn.Items.Insert(Math.Max(0, MMn.Items.IndexOf(questionMarkToolStripMenuItem)), job);
+
+			var classic = new ToolStripMenuItem("Classic layout") { CheckOnClick = true, Checked = UseClassicLayout,
+				ToolTipText = "Use the original LaserGRBL window layout. Takes effect after restarting." };
+			classic.CheckedChanged += (sender, args) =>
+			{
+				UseClassicLayout = classic.Checked;
+				MessageBox.Show(this, "Restart LaserGRBL to switch layouts.", "Layout", MessageBoxButtons.OK, MessageBoxIcon.Information);
+			};
+			job.DropDownItems.Add(new ToolStripSeparator());
+			job.DropDownItems.Add(classic);
 		}
 
 		private void ReportRebuild(Exception error)

@@ -1465,7 +1465,8 @@ namespace LaserGRBL
 			return true;
 		}
 
-		internal PreflightInput BuildPreflightInput()
+		/// <param name="scannedMaxS">Highest S from an earlier <see cref="PreflightCheck.Scan"/>, to skip scanning the file again.</param>
+		internal PreflightInput BuildPreflightInput(decimal? scannedMaxS = null, bool? scannedUsesZ = null)
 		{
 			var input = new PreflightInput { Lines = file.Count, InAlarm = MachineStatus == MacStatus.Alarm, HasWorkOffset = mWCO != GPoint.Zero, Homed = mHomedSinceConnect };
 			var range = file.Range.DrawingRange;
@@ -1487,7 +1488,8 @@ namespace LaserGRBL
 			catch (Exception) { } // configuration not read yet: skip the machine checks
 			decimal maxS;
 			bool usesZ;
-			PreflightCheck.Scan(file, out maxS, out usesZ);
+			if (scannedMaxS.HasValue && scannedUsesZ.HasValue) { maxS = scannedMaxS.Value; usesZ = scannedUsesZ.Value; }
+			else PreflightCheck.Scan(file, out maxS, out usesZ);
 			input.MaxS = maxS;
 			input.UsesZ = usesZ;
 			return input;

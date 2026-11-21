@@ -71,6 +71,8 @@ namespace LaserGRBL
 					TimerUpdate();
 				}
 			};
+			PassControls = panel;
+			EditControls = edits;
 			tableLayoutPanel5.Controls.Add(edits, 0, 3);
 			tableLayoutPanel5.SetColumnSpan(edits, tableLayoutPanel5.ColumnCount);
 			tableLayoutPanel5.Layout += (sender, args) => FitJobControls();
@@ -87,7 +89,12 @@ namespace LaserGRBL
 			BtnJobPasses.Click += (sender, args) => OpenJobEditor();
 		}
 
-		private void OpenJobEditor()
+		/// <summary>The job passes button and its summary, so the modern layout can show them in its own panel.</summary>
+		internal Control PassControls { get; private set; }
+		/// <summary>The image and job edit buttons (edit image, undo, redo, place, playback, camera).</summary>
+		internal Control EditControls { get; private set; }
+
+		internal void OpenJobEditor()
 		{
 			if (!Core.CanConfigurePasses || Core.JobEditorOpen) return;
 			if (Core.HasJobOperations)

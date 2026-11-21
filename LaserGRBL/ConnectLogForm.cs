@@ -8,6 +8,7 @@ using LaserGRBL.Icons;
 using LaserGRBL.UserControls;
 using System;
 using System.Drawing;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace LaserGRBL
@@ -87,6 +88,65 @@ namespace LaserGRBL
 				TimerUpdate();
 			};
 			BtnJobPasses.Click += (sender, args) => OpenJobEditor();
+		}
+
+		// ---- Used by the modern layout, which keeps this form hidden and drives it instead. ----
+
+		/// <summary>The command log and manual command box.</summary>
+		internal Control ConsoleControls { get { return GBCommands; } }
+
+		internal bool UsesSerialPort
+		{
+			get { return currentWrapper == ComWrapper.WrapperType.UsbSerial || currentWrapper == ComWrapper.WrapperType.UsbSerial2 || currentWrapper == ComWrapper.WrapperType.RJCPSerial; }
+		}
+
+		internal string ConnectionAddress { get { return UsesSerialPort ? CBPort.Text : TxtAddress.Text; } }
+
+		internal object[] PortNames { get { return CBPort.Items.Cast<object>().ToArray(); } }
+
+		internal object[] BaudRates { get { return CBSpeed.Items.Cast<object>().ToArray(); } }
+
+		internal object SelectedBaud { get { return CBSpeed.SelectedItem; } }
+
+		internal void SelectPort(string port)
+		{
+			if (CBPort.Items.Contains(port)) CBPort.SelectedItem = port;
+			else CBPort.Text = port;
+		}
+
+		internal void SelectBaud(object baud)
+		{
+			if (CBSpeed.Items.Contains(baud)) CBSpeed.SelectedItem = baud;
+		}
+
+		internal void RefreshPorts() { InitPortCB(); }
+
+		internal void EditImage() { RasterConverter.RasterToLaserForm.EditLoadedJob(jobPreview, Core); }
+		internal void UndoImageEdit() { NavigateRasterHistory(GrblFile.RasterEdit.Undo); }
+		internal void RedoImageEdit() { NavigateRasterHistory(GrblFile.RasterEdit.Redo); }
+		internal void ShowPlayback()
+		{
+			if (!Core.CanConfigurePasses || jobPreview.JobEditor is JobPlaybackView) return;
+			jobPreview.ShowJobEditor(new JobPlaybackView(Core.LoadedFile), "Job playback", showBack: true);
+			TimerUpdate();
+		}
+
+		internal void ToggleCamera()
+		{
+			if (jobPreview.JobEditor is CameraView) CloseJobEditor();
+			else if (jobPreview.JobEditor == null)
+			{
+				jobPreview.ShowJobEditor(new CameraView(), "Live camera", showBack: true, blocksRun: false);
+				TimerUpdate();
+			}
+		}
+		internal void PlaceImage() { PlaceRaster(); }
+
+		/// <summary>Connects with the selected port, or disconnects (asking first if a job is running).</summary>
+		internal void ToggleConnection()
+		{
+			ApplyConfig();
+			BtnConnectDisconnectClick(this, EventArgs.Empty);
 		}
 
 		/// <summary>The job passes button and its summary, so the modern layout can show them in its own panel.</summary>

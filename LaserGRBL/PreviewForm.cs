@@ -134,6 +134,12 @@ namespace LaserGRBL
 			editor.Focus();
 		}
 
+		/// <summary>Shows or hides the button row under the preview (reset, homing, custom buttons...).</summary>
+		internal void ShowButtonBar(bool show)
+		{
+			tableLayoutPanel8.Visible = show;
+		}
+
 		internal void SetJobEditorStatus(string message)
 		{
 			if (JobEditor == null) return;

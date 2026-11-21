@@ -609,6 +609,8 @@ namespace LaserGRBL
 			public double fres;
 			public bool vectorfilling;
 			public Firmware firmwareType;
+			/// <summary>Laser-off run-up past both ends of every horizontal or vertical scan line, in mm.</summary>
+			internal double overscanMm;
 		}
 
 		private string skipcmd = "G0";
@@ -1112,6 +1114,7 @@ namespace LaserGRBL
 			decimal curX = (decimal)c.oX;
 			decimal curY = (decimal)c.oY;
 			bool cumulate = false;
+			int skipDX = 0, skipDY = 0;
 
 			foreach (GrblCommand cmd in temp)
 			{
@@ -1150,6 +1153,22 @@ namespace LaserGRBL
 						//curX = curY = 0;
 					}
 
+					if (c.overscanMm > 0 && cumulate && cmd.IsMovement)
+					{
+						// Overscan turns around outside the image; merging the skip moves would cut the corner
+						// and bring the turnaround back inside, so keep each change of direction.
+						if (!oldcumulate) skipDX = skipDY = 0;
+						int dx = Math.Sign((cmd.X?.Number ?? curX) - curX), dy = Math.Sign((cmd.Y?.Number ?? curY) - curY);
+						if ((skipDX != 0 || skipDY != 0) && (dx != skipDX || dy != skipDY))
+						{
+							if (c.pwm)
+								rv.Add(new GrblCommand(string.Format("{0} X{1} Y{2} S0", skipcmd, formatnumber((double)curX), formatnumber((double)curY))));
+							else
+								rv.Add(new GrblCommand(string.Format("{0} X{1} Y{2} {3}", skipcmd, formatnumber((double)curX), formatnumber((double)curY), c.lOff)));
+						}
+						if (dx != 0 || dy != 0) { skipDX = dx; skipDY = dy; }
+					}
+
 					if (cmd.IsMovement)
 					{
 						if (cmd.X != null) curX = cmd.X.Number;
@@ -1174,12 +1193,22 @@ namespace LaserGRBL
 			if (c.dir == RasterConverter.ImageProcessor.Direction.Horizontal || c.dir == RasterConverter.ImageProcessor.Direction.Vertical)
 			{
 				bool h = (c.dir == RasterConverter.ImageProcessor.Direction.Horizontal); //horizontal/vertical
+				int over = OverscanPixels(c, h);
+				Func<int, bool, ColorSegment> blank = (length, reverse) => h ? (ColorSegment)new XSegment(0, length, reverse) : new YSegment(0, length, reverse);
 
 				for (int i = 0; i < (h ? bmp.Height : bmp.Width); i++)
 				{
 					bool d = uni || IsEven(i); //direct/reverse
 					int prevCol = -1;
 					int len = -1;
+
+					if (over > 0)
+					{
+						// Start each line outside the image so the head is up to speed before the first pixel.
+						// Bidirectional lines already start outside: the previous line ran past this edge.
+						if (i == 0 || uni) rv.Add(blank(over, d));
+						rv.Add(blank(over, !d));
+					}
 
 					for (int j = d ? 0 : (h ? bmp.Width - 1 : bmp.Height - 1); d ? (j < (h ? bmp.Width : bmp.Height)) : (j >= 0); j = (d ? j + 1 : j - 1))
 						ExtractSegment(bmp, h ? j : i, h ? i : j, !d, ref len, ref prevCol, rv, c); //extract different segments
@@ -1189,10 +1218,12 @@ namespace LaserGRBL
 					else
 						rv.Add(new YSegment(prevCol, len + 1, !d)); //close last segment
 
+					if (over > 0) rv.Add(blank(over, !d)); // run past the far edge before slowing down
+
 					if (uni) // add "go back"
 					{
-						if (h) rv.Add(new XSegment(0, bmp.Width, true));
-						else rv.Add(new YSegment(0, bmp.Height, true));
+						if (h) rv.Add(new XSegment(0, bmp.Width + over, true));
+						else rv.Add(new YSegment(0, bmp.Height + over, true));
 					}
 
 					if (i < (h ? bmp.Height - 1 : bmp.Width - 1))
@@ -1278,6 +1309,15 @@ namespace LaserGRBL
 			}
 
 			return rv;
+		}
+
+		private static int OverscanPixels(L2LConf c, bool horizontal)
+		{
+			if (c.overscanMm <= 0 || c.vectorfilling) return 0;
+			double? pitch = horizontal ? c.pitchX : c.pitchY;
+			double mmPerPixel = pitch.HasValue ? Math.Abs(pitch.Value) : 1 / c.res;
+			if (mmPerPixel <= 0 || double.IsNaN(mmPerPixel) || double.IsInfinity(mmPerPixel)) return 0;
+			return Math.Max(1, (int)Math.Round(c.overscanMm / mmPerPixel));
 		}
 
 		private void ExtractSegment(Bitmap image, int x, int y, bool reverse, ref int len, ref int prevCol, List<ColorSegment> rv, L2LConf c)

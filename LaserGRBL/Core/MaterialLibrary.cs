@@ -103,6 +103,9 @@ namespace LaserGRBL
 		internal JobPass Pass { get; private set; }
 		internal int Repeats { get; private set; }
 		internal decimal KerfMm { get; private set; }
+		internal decimal ZStepMm { get; private set; }
+		/// <summary>Fill line spacing from the material's lines/mm, or 0 when it has none.</summary>
+		internal decimal FillSpacingMm { get; private set; }
 		internal string Warning { get; private set; }
 
 		internal static MaterialApplication For(MaterialSetting setting, IEnumerable<GrblCommand> source, bool supportsKerf)
@@ -134,13 +137,13 @@ namespace LaserGRBL
 			else warnings.Add("This toolpath has no laser-on F values, so speed is left at 100%.");
 			if (setting.Extras.KerfMm > 0 && !supportsKerf)
 				warnings.Add("Kerf only applies to imported SVG outlines, so it was skipped.");
-			if (setting.Extras.ZStepMm > 0)
-				warnings.Add("Z step per pass is stored but not applied yet.");
 			return new MaterialApplication
 			{
 				Pass = new JobPass(power, speed),
 				Repeats = Math.Max(1, Math.Min(99, setting.Cycles)),
 				KerfMm = supportsKerf ? setting.Extras.KerfMm : 0,
+				ZStepMm = setting.Extras.ZStepMm,
+				FillSpacingMm = setting.Extras.LinesPerMm > 0 ? Math.Round(1 / setting.Extras.LinesPerMm, 4) : 0,
 				Warning = string.Join(" ", warnings)
 			};
 		}

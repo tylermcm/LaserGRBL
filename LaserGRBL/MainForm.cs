@@ -201,6 +201,8 @@ namespace LaserGRBL
 				ToolTipText = "When homing ($22) is enabled, run $H before the first job unless the machine was homed since it connected." };
 			homeFirst.CheckedChanged += (sender, args) => GrblCore.HomeBeforeFirstRun = homeFirst.Checked;
 			MnGrbl.DropDownItems.Insert(MnGrbl.DropDownItems.IndexOf(MnUnlock) + 1, homeFirst);
+			MnGrbl.DropDownItems.Insert(MnGrbl.DropDownItems.IndexOf(homeFirst) + 1, new ToolStripMenuItem("Raster overscan...", null, (sender, args) => RasterOverscanForm.ShowFor(this))
+				{ ToolTipText = "Run each raster line past the image with the laser off so edges don't burn darker." });
 			IconsMgr.PrepareMenuItem(autoSizeToolStripMenuItem, "mdi-magnify-scan");
 			IconsMgr.PrepareMenuItem(zoomInToolStripMenuItem, "mdi-magnify-plus-outline");
 			IconsMgr.PrepareMenuItem(zoomOutToolStripMenuItem, "mdi-magnify-minus-outline");

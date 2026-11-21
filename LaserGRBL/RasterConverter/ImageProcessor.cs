@@ -1074,6 +1074,7 @@ namespace LaserGRBL.RasterConverter
 						conf.borderSpeed = BorderSpeed;
 						conf.pwm = Settings.GetObject("Support Hardware PWM", true);
 						conf.firmwareType = Settings.GetObject("Firmware Type", Firmware.Grbl);
+					conf.overscanMm = (double)RasterOverscanForm.OverscanMm;
 
 						if (SelectedTool == Tool.NoProcessing)
 							mCore.LoadedFile.LoadImageL2L(bmp, mFileName, conf, mAppend, mCore);
@@ -1201,7 +1202,8 @@ namespace LaserGRBL.RasterConverter
 				lOff = LaserOff,
 				dir = direction,
 				pwm = RasterSupportsPower,
-				firmwareType = rasterFirmware
+				firmwareType = rasterFirmware,
+				overscanMm = (double)RasterOverscanForm.OverscanMm
 			};
 		}
 

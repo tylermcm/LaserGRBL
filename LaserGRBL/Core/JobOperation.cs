@@ -37,6 +37,10 @@ namespace LaserGRBL
 		/// <summary>Set by the last AppendTo: how many contours kerf compensation moved and left unchanged.</summary>
 		internal int KerfCompensated { get; private set; }
 		internal int KerfSkipped { get; private set; }
+		/// <summary>Cut order, lead-ins, tabs, fill and Z step. Null runs the contours as drawn.</summary>
+		internal ToolpathOptions Toolpath { get; set; }
+		/// <summary>What the last AppendTo did with <see cref="Toolpath"/>, for the status line.</summary>
+		internal string ToolpathReport { get; private set; }
 		internal List<JobPassSection> CompiledPasses { get; } = new List<JobPassSection>();
 		internal int Start { get; set; }
 		internal int End { get; set; }
@@ -61,7 +65,8 @@ namespace LaserGRBL
 		{
 			return new JobOperation(name, Source, repeat, settings, enabled)
 			{
-				Contours = Contours, RepeatContours = RepeatContours, Placement = Placement, Passes = Passes, KerfMm = KerfMm
+				Contours = Contours, RepeatContours = RepeatContours, Placement = Placement, Passes = Passes, KerfMm = KerfMm,
+				Toolpath = Toolpath?.Clone()
 			};
 		}
 
@@ -75,27 +80,37 @@ namespace LaserGRBL
 				var source = Placement == null ? Source : Placement.Transform(Source);
 				var contours = Contours;
 				KerfCompensated = KerfSkipped = 0;
-				if (KerfMm > 0 && SupportsKerf)
+				ToolpathReport = null;
+				bool contourWork = SupportsKerf && (KerfMm > 0 || Toolpath != null && Toolpath.ChangesContours);
+				if (contourWork)
 				{
-					// After placement, so the offset is in bed millimetres whatever the scale.
-					var kerf = KerfCompensation.Apply(source, contours, (double)KerfMm);
-					source = kerf.Commands;
-					contours = kerf.Contours;
-					KerfCompensated = kerf.Compensated;
-					KerfSkipped = kerf.Skipped;
+					// After placement, so offsets, lead-ins and tabs are in bed millimetres whatever the scale.
+					var rewritten = ContourToolpath.Apply(source, contours, Toolpath, (double)KerfMm);
+					source = rewritten.Commands;
+					contours = rewritten.Contours;
+					KerfCompensated = rewritten.KerfCompensated;
+					KerfSkipped = rewritten.KerfSkipped;
+					ToolpathReport = Report(rewritten);
 				}
+				decimal zStep = Toolpath?.ZStepMm ?? 0;
 				if (RepeatContours && contours != null && contours.Length > 0)
 				{
 					for (int contour = 0; contour < contours.Length; contour++)
 					{
 						int end = contour + 1 < contours.Length ? contours[contour + 1] : source.Length;
 						for (int repeat = 0; repeat < Repeats; repeat++)
+						{
+							StepZ(commands, zStep, repeat);
 							AddBlock(commands, source, contours[0], contours[contour], end);
+						}
+						ReturnZ(commands, zStep, Repeats);
 					}
 				}
 				else
+				{
 					for (int repeat = 0; repeat < Repeats; repeat++)
 					{
+						StepZ(commands, zStep, repeat);
 						int start = commands.Count;
 						AddBlock(commands, source, 0, 0, source.Length);
 						if (Passes != null)
@@ -104,8 +119,40 @@ namespace LaserGRBL
 									Repeats == 1 ? pass.Name : string.Format("Repeat {0} · {1}", repeat + 1, pass.Name),
 									start + 3 + pass.Start, start + 3 + pass.End));
 					}
+					ReturnZ(commands, zStep, Repeats);
+				}
 			}
 			End = commands.Count;
+		}
+
+		/// <summary>Lowers the head by one Z step before every repeat after the first; the laser is already off (M5).</summary>
+		private static void StepZ(List<GrblCommand> commands, decimal step, int repeat)
+		{
+			if (step <= 0 || repeat == 0) return;
+			commands.Add(new GrblCommand("G91"));
+			commands.Add(new GrblCommand("G0 Z" + (-step).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+			commands.Add(new GrblCommand("G90"));
+		}
+
+		/// <summary>Puts Z back where the operation started, so the next operation and the next job keep their focus.</summary>
+		private static void ReturnZ(List<GrblCommand> commands, decimal step, int repeats)
+		{
+			if (step <= 0 || repeats < 2) return;
+			commands.Add(new GrblCommand("G91"));
+			commands.Add(new GrblCommand("G0 Z" + (step * (repeats - 1)).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)));
+			commands.Add(new GrblCommand("G90"));
+		}
+
+		private static string Report(ContourToolpath.Result result)
+		{
+			var parts = new List<string>();
+			if (result.FillPaths > 0) parts.Add(result.FillPaths + " fill line(s)");
+			if (result.Reordered) parts.Add("reordered inside first");
+			if (result.LeadIns > 0) parts.Add(result.LeadIns + " lead-in(s)");
+			if (result.LeadSkipped > 0) parts.Add(result.LeadSkipped + " contour(s) had no room for a lead-in");
+			if (result.Tabbed > 0) parts.Add(result.Tabbed + " outline(s) tabbed");
+			parts.AddRange(result.Notes);
+			return parts.Count == 0 ? null : string.Join("; ", parts);
 		}
 
 		private void AddBlock(List<GrblCommand> commands, GrblCommand[] source, int prefix, int start, int end)
@@ -139,6 +186,7 @@ namespace LaserGRBL
 			internal JobPlacement Placement;
 			internal JobPassSection[] Passes;
 			[OptionalField] internal decimal KerfMm;
+			[OptionalField] internal ToolpathOptions Toolpath;
 
 			internal Saved(JobOperation operation)
 			{
@@ -152,13 +200,14 @@ namespace LaserGRBL
 				Placement = operation.Placement;
 				Passes = operation.Passes;
 				KerfMm = operation.KerfMm;
+				Toolpath = operation.Toolpath;
 			}
 
 			internal JobOperation Restore()
 			{
 				return new JobOperation(Name, Commands.Select(line => new GrblCommand(line)).ToArray(), Repeats, Settings, Enabled)
 				{
-					Contours = Contours, RepeatContours = RepeatContours, Placement = Placement, Passes = Passes, KerfMm = KerfMm
+					Contours = Contours, RepeatContours = RepeatContours, Placement = Placement, Passes = Passes, KerfMm = KerfMm, Toolpath = Toolpath
 				};
 			}
 		}

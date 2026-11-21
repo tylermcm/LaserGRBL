@@ -43,6 +43,7 @@ namespace LaserGRBL
 			grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Current estimate", ReadOnly = true, FillWeight = 105 });
 			grid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "Per contour", FillWeight = 70 });
 			grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Kerf mm", FillWeight = 60, ToolTipText = "Half of this moves closed SVG outlines outward and holes inward, so cut parts keep their drawn size." });
+			grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Toolpath", ReadOnly = true, FillWeight = 130, ToolTipText = "Cut order, lead-ins, tabs, fill and Z step. Select a row and click Toolpath... to change." });
 			grid.Columns[3].ReadOnly = !Settings.GetObject("Support Hardware PWM", true);
 			foreach (DataGridViewColumn column in grid.Columns) column.SortMode = DataGridViewColumnSortMode.NotSortable;
 			foreach (var operation in core.LoadedFile.Operations)
@@ -51,8 +52,9 @@ namespace LaserGRBL
 					? Offset(core.LoadedFile, operation.End) - Offset(core.LoadedFile, operation.Start) : TimeSpan.Zero;
 				int row = grid.Rows.Add(operation.Enabled, operation.Name, operation.Repeats,
 					operation.Settings?.PowerPercent ?? 100, operation.Settings?.SpeedPercent ?? 100, FormatTime(duration), operation.RepeatContours,
-					operation.KerfMm.ToString("0.###", CultureInfo.CurrentCulture));
+					operation.KerfMm.ToString("0.###", CultureInfo.CurrentCulture), Describe(operation.Toolpath));
 				grid.Rows[row].Tag = operation;
+				grid.Rows[row].Cells[8].Tag = operation.Toolpath;
 				grid.Rows[row].Cells[6].ReadOnly = !operation.SupportsKerf;
 				grid.Rows[row].Cells[7].ReadOnly = !operation.SupportsKerf;
 			}
@@ -62,6 +64,7 @@ namespace LaserGRBL
 			AddButton("Move down", () => MoveRow(1));
 			AddButton("Preview selected", PreviewSelected);
 			AddButton("Place selected", PlaceSelected);
+			AddButton("Toolpath...", EditToolpath);
 			AddButton("Apply material...", ApplyMaterial);
 			AddButton("Apply", Apply);
 			AddButton("Cancel", () => CloseRequested?.Invoke(this, EventArgs.Empty));
@@ -120,8 +123,34 @@ namespace LaserGRBL
 			if (!grid.Columns[3].ReadOnly) row.Cells[3].Value = applied.Pass.PowerPercent;
 			row.Cells[4].Value = applied.Pass.SpeedPercent;
 			if (operation.SupportsKerf) row.Cells[7].Value = applied.KerfMm.ToString("0.###", CultureInfo.CurrentCulture);
+			var toolpath = (row.Cells[8].Tag as ToolpathOptions)?.Clone() ?? new ToolpathOptions();
+			toolpath.ZStepMm = applied.ZStepMm;
+			if (applied.FillSpacingMm >= 0.02m && toolpath.Fill != FillPattern.None) toolpath.FillSpacingMm = applied.FillSpacingMm;
+			SetToolpath(row, toolpath.IsEmpty ? null : toolpath);
 			row.Cells[5].Value = "Apply to update";
 			StatusChanged?.Invoke(setting.Name + " set on " + row.Cells[1].Value + ". " + applied.Warning);
+		}
+
+		private void EditToolpath()
+		{
+			var row = grid.CurrentRow;
+			var operation = row?.Tag as JobOperation;
+			if (operation == null || !grid.EndEdit()) return;
+			ToolpathOptions edited;
+			if (!ToolpathOptionsForm.Edit(FindForm(), Convert.ToString(row.Cells[1].Value), row.Cells[8].Tag as ToolpathOptions, operation.SupportsKerf, out edited)) return;
+			SetToolpath(row, edited);
+			row.Cells[5].Value = "Apply to update";
+		}
+
+		private static void SetToolpath(DataGridViewRow row, ToolpathOptions options)
+		{
+			row.Cells[8].Tag = options;
+			row.Cells[8].Value = Describe(options);
+		}
+
+		private static string Describe(ToolpathOptions options)
+		{
+			return options == null ? "As drawn" : options.ToString();
 		}
 
 		private void PreviewSelected()
@@ -179,6 +208,7 @@ namespace LaserGRBL
 					string kerf = Convert.ToString(row.Cells[7].Value);
 					draft.KerfMm = draft.SupportsKerf && !string.IsNullOrWhiteSpace(kerf) ? decimal.Parse(kerf, CultureInfo.CurrentCulture) : 0;
 					if (draft.KerfMm < 0 || draft.KerfMm > 5) throw new ArgumentOutOfRangeException("Kerf", "Kerf must be between 0 and 5 mm.");
+					draft.Toolpath = (row.Cells[8].Tag as ToolpathOptions)?.Clone();
 					operations.Add(draft);
 				}
 				grid.Enabled = actions.Enabled = false;
@@ -191,10 +221,13 @@ namespace LaserGRBL
 					grid.Enabled = actions.Enabled = true;
 					if (error == null)
 					{
+						var notes = new List<string>();
 						int skipped = core.LoadedFile.Operations.Where(o => o.Enabled && o.KerfMm > 0).Sum(o => o.KerfSkipped);
 						if (skipped > 0)
-							StatusChanged?.Invoke(string.Format(CultureInfo.CurrentCulture,
+							notes.Add(string.Format(CultureInfo.CurrentCulture,
 								"Kerf left {0} contour(s) as drawn: open paths, holes smaller than the kerf, or paths that change speed or power partway.", skipped));
+						notes.AddRange(core.LoadedFile.Operations.Where(o => o.Enabled && o.ToolpathReport != null).Select(o => o.Name + ": " + o.ToolpathReport + "."));
+						if (notes.Count > 0) StatusChanged?.Invoke(string.Join(" ", notes));
 						CloseRequested?.Invoke(this, EventArgs.Empty);
 					}
 					else ShowError(error);

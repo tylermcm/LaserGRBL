@@ -133,6 +133,34 @@ and paths that change speed or power partway are left as drawn, and the status
 line reports how many. Kerf is applied after placement and is saved in operations
 projects.
 
+### Toolpath options
+
+Select an operation in **Operations** and click **Toolpath...**. The **Toolpath**
+column shows what is set. Everything except Z step applies to SVG imports only, after
+placement and kerf, and is saved in operations projects.
+
+- **Cut order: Inside first** cuts every hole and detail before the closed outline
+  around it, choosing the nearest next path. Parts stay held by the sheet until
+  they're finished. Paths with relative moves, Z or inches keep the drawn order.
+- **Lead-in** starts each closed cut a short distance away on the waste side (outside an
+  outline, inside a hole), so the pierce mark isn't on the part. **Overcut** keeps cutting
+  past the start to close the seam. Contours with no room for a lead-in are cut without one.
+- **Tabs** leave short uncut bridges, spaced evenly along outer outlines, by moving at
+  `S0` across each gap. Holes are cut fully.
+- **Fill** (hatch, cross-hatch or offset) fills closed shapes, with holes left empty.
+  It runs before the outlines, at the outlines' power and speed. **Fill only** drops
+  the outlines.
+- **Z step per repeat** lowers the head before each repeat after the first and puts Z
+  back when the operation ends, for deep cuts on machines with a Z axis.
+
+**Apply material...** also fills Z step and, when a fill is set, the fill spacing from
+the material's lines/mm.
+
+**Grbl > Raster overscan...** makes each horizontal or vertical raster line start and
+end outside the image with the laser off. The head is then at full speed across the
+whole image, so the edges don't come out darker. Leave room beside the image: one placed at
+X0 will travel to negative X. This applies to new raster imports.
+
 ### Home before the first job
 
 With homing enabled (`$22=1`), **Grbl > Home before first job after connecting**

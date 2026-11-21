@@ -808,6 +808,14 @@ namespace LaserGRBL
 			RiseOnFileLoaded(filename, elapsed);
 		}
 
+		/// <summary>Turns a plain G-code file into a single operation, so it can be moved, scaled and edited like an import.</summary>
+		internal void ConvertToOperation(string name)
+		{
+			if (Operations.Count > 0 || list.Count == 0 || CheckInUse()) return;
+			var commands = list.Select(command => new GrblCommand(command.Command)).ToArray();
+			InstallGeneratedOperation(new JobOperation(string.IsNullOrWhiteSpace(name) ? "G-code" : name, commands), name, false);
+		}
+
 		/// <summary>Adds generated G-code (a marking, a nested copy) as a new operation after the current job.</summary>
 		internal void AppendGeneratedOperation(JobOperation operation)
 		{

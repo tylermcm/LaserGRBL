@@ -66,6 +66,10 @@ namespace LaserGRBL
 		private ShellLabel processFooter, runPercent, runDetail;
 		private ProgressStrip runProgress;
 
+		private const long ConnectTimeoutMs = 12000;
+		private long connectingSince, connectFailedUntil;
+		private string connectFailedPort;
+
 		private decimal? scannedMaxS;
 		private bool? scannedUsesZ;
 		private long lastChecks;
@@ -174,13 +178,19 @@ namespace LaserGRBL
 
 		private void OnModeClicked(ShellMode mode)
 		{
-			if (mode == ShellMode.Design)
-			{
-				// Design is the job layout editor: operations, placement and passes.
-				if (Core.CanConfigurePasses && !Core.JobEditorOpen) ConnectionForm.OpenJobEditor();
-				else if (!Core.HasProgram) MnFileOpen_Click(this, EventArgs.Empty);
-			}
+			CloseSideEditors();
 			SetShellMode(mode);
+		}
+
+		/// <summary>
+		/// Closes the older full-screen editors (passes, operations, playback, camera) so a mode tab always takes you there.
+		/// The image converter is left alone while it is generating.
+		/// </summary>
+		private void CloseSideEditors()
+		{
+			var editor = PreviewForm.JobEditor;
+			if (editor is JobPassEditor || editor is JobOperationsEditor || editor is JobPlaybackView || editor is CameraView || editor is JobPlacementView)
+				PreviewForm.CloseJobEditor();
 		}
 
 		// =====================================================================
@@ -190,7 +200,7 @@ namespace LaserGRBL
 		private void BuildRail()
 		{
 			rail = NewBar(DockStyle.Left, RailWidth, AnchorStyles.Right);
-			railLayers = RailButton(ShellIcon.Layers, "Project panel", 8, (s, e) => { projectPanel.Visible = !projectPanel.Visible; railLayers.Active = projectPanel.Visible; });
+			railLayers = RailButton(ShellIcon.Layers, "Project panel", 8, (s, e) => { bool show = !railLayers.Active; projectPanel.Visible = show; railLayers.Active = show; });
 			railOpen = RailButton(ShellIcon.Folder, "Open file", 44, (s, e) => MnFileOpen_Click(s, e));
 			railMaterial = RailButton(ShellIcon.Pencil, "Material database", 80, (s, e) => MnMaterialDB_Click(s, e));
 			railMachine = RailButton(ShellIcon.Console, "Console", 116, (s, e) => ShowConsole(!consoleDrawer.Visible));
@@ -220,7 +230,7 @@ namespace LaserGRBL
 			var divider = new Panel { BackColor = ShellPalette.Border, Size = new Size(1, 20), Location = new Point(consoleButton.Right + 8, 14) };
 			statusChip = new ShellButton { ButtonStyle = ShellButtonStyle.Ghost, Location = new Point(divider.Right + 6, 10), Cursor = Cursors.Default, TabStop = false };
 			estimateLabel = new ShellLabel("", ShellPalette.UiFont, ShellPalette.TextSoft) { AutoSize = true, Location = new Point(statusChip.Right + 8, 16) };
-			offlineNote = new ShellLabel("No laser connected: save the job and run it from the machine's SD card or USB.", ShellPalette.UiFont, ShellPalette.Muted) { AutoSize = true };
+			offlineNote = new ShellLabel("Save the job to run it from the machine's SD card or USB.", ShellPalette.UiFont, ShellPalette.Muted) { AutoSize = true };
 
 			saveArrow = new ShellButton { Icon = ShellIcon.Chevron, ButtonStyle = ShellButtonStyle.Accent, Size = new Size(26, 32), AccessibleName = "More ways to save", Radius = 6 };
 			saveArrow.Click += (s, e) => ShowSaveMenu();
@@ -239,7 +249,9 @@ namespace LaserGRBL
 			powerButton.Click += (s, e) => GetOvMenu().Show(Cursor.Position, ToolStripDropDownDirection.AboveLeft);
 			speedButton.Click += (s, e) => GetOvMenu().Show(Cursor.Position, ToolStripDropDownDirection.AboveLeft);
 
-			bottomBar.Controls.AddRange(new Control[] { consoleButton, divider, statusChip, estimateLabel, offlineNote, powerButton, speedButton, frameButton, pauseButton, connectButton, mainButton, saveArrow });
+			// Connecting lives in one place, the machine chip at the top right.
+			connectButton.Visible = false;
+			bottomBar.Controls.AddRange(new Control[] { consoleButton, divider, statusChip, estimateLabel, offlineNote, powerButton, speedButton, frameButton, pauseButton, mainButton, saveArrow });
 			bottomBar.Resize += (s, e) => LayoutBottomBar();
 		}
 
@@ -277,6 +289,7 @@ namespace LaserGRBL
 			consoleDrawer.Padding = new Padding(8, 6, 8, 6);
 			consoleDrawer.Controls.Add(console);
 			consoleDrawer.Visible = false;
+			ConnectionForm.StyleConsole(ShellPalette.Window, ShellPalette.Card, ShellPalette.Text, ShellPalette.Muted);
 		}
 
 		private void ShowConsole(bool show)
@@ -542,7 +555,12 @@ namespace LaserGRBL
 			modeDesign.Active = mode == ShellMode.Design;
 			modePrepare.Active = mode == ShellMode.Prepare;
 			modeRun.Active = mode == ShellMode.Run;
-			processStack.Visible = mode != ShellMode.Run;
+			// Design: lay objects out (project panel, more room for the grid). Prepare: both panels. Run: progress only.
+			projectPanel.Visible = mode != ShellMode.Run;
+			// Visible reads false until the window is shown, so use the value just set.
+			railLayers.Active = mode != ShellMode.Run;
+			processPanel.Visible = mode != ShellMode.Design;
+			processStack.Visible = mode == ShellMode.Prepare;
 			runStack.Visible = mode == ShellMode.Run;
 			RefreshShell();
 		}
@@ -626,14 +644,14 @@ namespace LaserGRBL
 							Detail = operation.Repeats > 1 ? "×" + operation.Repeats : null
 						};
 						row.Click += (s, e) => { selectedObject = index; RebuildShellContent(); RefreshShell(); };
-						row.DoubleClick += (s, e) => ConnectionForm.OpenJobEditor();
 						row.ToggleClicked += (s, e) => ToggleOperation(index);
 						objectRows.Add(row);
 					}
 				}
 				else if (hasProgram)
 				{
-					var row = new ListRow(file.RasterSource != null ? "Image" : "G-code") { Icon = file.RasterSource != null ? ShellIcon.Image : ShellIcon.Dashed, Selected = true, Toggle = true };
+					// A single object can't be hidden from itself, so it has no eye.
+					var row = new ListRow(file.RasterSource != null ? "Image" : "G-code") { Icon = file.RasterSource != null ? ShellIcon.Image : ShellIcon.Dashed, Selected = true };
 					objectRows.Add(row);
 				}
 				InsertAfter(projectStack, objectsHeader, objectRows);
@@ -665,7 +683,6 @@ namespace LaserGRBL
 			if (running && !shellWasRunning) SetShellMode(ShellMode.Run);
 			else if (!running && shellWasRunning) SetShellMode(ShellMode.Prepare);
 			shellWasRunning = running;
-			if (shellMode == ShellMode.Design && !Core.JobEditorOpen && !running) { shellMode = ShellMode.Prepare; modeDesign.Active = false; modePrepare.Active = true; }
 
 			// Top bar.
 			string path = hasProgram ? Settings.GetObject<string>("Core.LastOpenFile", "") : "";
@@ -673,9 +690,26 @@ namespace LaserGRBL
 			crumbFolder.Text = folder.Length > 0 ? folder + " /" : "";
 			crumbFile.Text = hasProgram ? System.IO.Path.GetFileNameWithoutExtension(path) : "No file loaded";
 			crumbState.Text = hasProgram ? string.Format(c, "{0:N0} lines", file.Count) : "";
+			// Give up on a connection that never answers, instead of showing "Connecting..." forever.
+			if (status == GrblCore.MacStatus.Connecting)
+			{
+				if (connectingSince == 0) connectingSince = HiResTimer.TotalMilliseconds;
+				else if (HiResTimer.TotalMilliseconds - connectingSince > ConnectTimeoutMs)
+				{
+					connectingSince = 0;
+					connectFailedUntil = HiResTimer.TotalMilliseconds + 8000;
+					connectFailedPort = ConnectionForm.ConnectionAddress;
+					Core.CloseCom(true);
+					status = Core.MachineStatus;
+				}
+			}
+			else connectingSince = 0;
+			bool justFailed = !connected && status != GrblCore.MacStatus.Connecting && HiResTimer.TotalMilliseconds < connectFailedUntil;
 			machineChip.Text = connected ? Core.Type + "  ·  " + GrblCore.TranslateEnum(status)
-				: status == GrblCore.MacStatus.Connecting ? "Connecting..." : "No laser connected  ·  Connect";
-			machineChip.Dot = connected ? ShellPalette.Good : status == GrblCore.MacStatus.Connecting ? ShellPalette.Warn : ShellPalette.Faint;
+				: status == GrblCore.MacStatus.Connecting ? "Connecting to " + ConnectionForm.ConnectionAddress + "..."
+				: justFailed ? "No answer on " + connectFailedPort + "  ·  Retry"
+				: "No laser connected  ·  Connect";
+			machineChip.Dot = connected ? ShellPalette.Good : status == GrblCore.MacStatus.Connecting ? ShellPalette.Warn : justFailed ? ShellPalette.Bad : ShellPalette.Faint;
 			machineChip.FitWidth(10);
 			LayoutTopBar(modeDesign.Parent);
 
@@ -686,7 +720,6 @@ namespace LaserGRBL
 			TimeSpan estimate = running ? Core.ProjectedTime : file.EstimatedTime;
 			estimateLabel.Text = hasProgram ? (running ? "Projected " : "Est. ") + Utils.TimeSpanToString(estimate, Utils.TimePrecision.Second, Utils.TimePrecision.Second, " ", true) : "";
 			offlineNote.Visible = !connected && hasProgram;
-			connectButton.Visible = !connected;
 			powerButton.Visible = speedButton.Visible = connected;
 			powerButton.Text = "Power " + Core.OverrideS + "%";
 			speedButton.Text = "Speed " + Core.OverrideG1 + "%";
@@ -714,7 +747,7 @@ namespace LaserGRBL
 			fieldY.Value = box.HasValue ? box.Value.Y.ToString("0.00", c) : "";
 			fieldW.Value = box.HasValue ? box.Value.Width.ToString("0.00", c) : "";
 			fieldH.Value = box.HasValue ? box.Value.Height.ToString("0.00", c) : "";
-			bool geometryEditable = canEdit && (raster != null && !Core.HasJobOperations || Core.HasJobOperations && (SelectedOperation()?.Placement?.Rotation ?? 0) == 0);
+			bool geometryEditable = canEdit && hasProgram && (!Core.HasJobOperations || (SelectedOperation()?.Placement?.Rotation ?? 0) == 0);
 			foreach (var f in new[] { fieldX, fieldY, fieldW, fieldH }) f.ReadOnly = !geometryEditable;
 			rotateLabel.Text = "Rotate  " + (SelectedOperation()?.Placement?.Rotation ?? 0).ToString("0.#", c) + "°";
 			bool showImage = raster != null;
@@ -736,7 +769,7 @@ namespace LaserGRBL
 			materialCombo.Enabled = canEdit;
 
 			// Process panel.
-			if (shellMode != ShellMode.Run)
+			if (shellMode == ShellMode.Prepare)
 			{
 				var range = file.Range.DrawingRange;
 				boardCard.Title = !hasProgram ? "No job" : range.ValidRange ? string.Format(c, "Job · {0:0.##} × {1:0.##} mm", range.X.Max - range.X.Min, range.Y.Max - range.Y.Min) : "Job";
@@ -770,7 +803,7 @@ namespace LaserGRBL
 				processFooter.Text = !hasProgram ? "" : string.Format(c, "{0} pass{1} · {2}", passes, passes == 1 ? "" : "es",
 					materialCombo.SelectedIndex > 0 ? materialCombo.SelectedItem.ToString() : Utils.TimeSpanToString(file.EstimatedTime, Utils.TimePrecision.Minute, Utils.TimePrecision.Second, " ", true));
 			}
-			else
+			else if (shellMode == ShellMode.Run)
 			{
 				TimeSpan elapsed = Core.ProgramTime, projected = Core.ProjectedTime;
 				double percent = projected.TotalSeconds > 0 ? Math.Min(100, elapsed.TotalSeconds * 100 / projected.TotalSeconds) : 0;
@@ -892,9 +925,31 @@ namespace LaserGRBL
 			}
 			var file = Core.LoadedFile;
 			var operation = SelectedOperation();
+			if (operation == null && file.RasterSource == null)
+			{
+				// Plain G-code: make it an operation first, which keeps it as-is but lets placement move and scale it.
+				var passes = Core.Passes;
+				string name = System.IO.Path.GetFileNameWithoutExtension(Settings.GetObject<string>("Core.LastOpenFile", "G-code"));
+				try
+				{
+					file.ConvertToOperation(name);
+					if (passes != null && Core.CanConfigurePasses) Core.ConfigurePasses(passes);
+				}
+				catch (Exception ex) when (ex is InvalidOperationException || ex is ArgumentException) { ShowShellError(ex.Message); return; }
+				selectedObject = 0;
+				operation = SelectedOperation();
+				if (operation == null) return;
+			}
 			if (operation != null)
 			{
 				var source = Nesting.Bounds(operation);
+				try { new JobPlacement(new PointF(0, 0), new PointF(0, 0), 1, 0).Transform(operation.Source); }
+				catch (InvalidOperationException)
+				{
+					ShowShellError("This G-code uses relative moves or Z, so it can't be moved or resized here.");
+					RefreshShell();
+					return;
+				}
 				double scale = w / source.Width;
 				if (scale <= 0 || scale > 10) { ShowShellError("Scale must stay between 0 and 10 times the original size."); return; }
 				var draft = operation.WithSettings(operation.Name, operation.Repeats, operation.Settings, operation.Enabled);
@@ -988,11 +1043,12 @@ namespace LaserGRBL
 			}
 		}
 
+		/// <summary>The job card's pencil: jump to the selected object's position fields.</summary>
 		private void EditPlacement()
 		{
-			if (Core.LoadedFile.RasterSource != null && !Core.HasJobOperations || Core.HasJobOperations && Core.LoadedFile.Operations.Count == 1 && Core.LoadedFile.RasterSource != null)
-				ConnectionForm.PlaceImage();
-			else if (Core.HasJobOperations) ConnectionForm.OpenJobEditor();
+			if (!projectPanel.Visible) SetShellMode(ShellMode.Prepare);
+			fieldX.Box.Focus();
+			fieldX.Box.SelectAll();
 		}
 
 		// =====================================================================
@@ -1066,7 +1122,7 @@ namespace LaserGRBL
 					card.Speed.SelectionChangeCommitted += apply;
 					card.Scan.SelectionChangeCommitted += apply;
 					card.Click += (s, e) => { selectedObject = index; RebuildShellContent(); RefreshShell(); };
-					card.Menu.Click += (s, e) => ConnectionForm.OpenJobEditor();
+					card.Menu.Click += (s, e) => ShowOperationMenu(card.Menu, index);
 					passCards.Add(card);
 				}
 			}
@@ -1200,8 +1256,36 @@ namespace LaserGRBL
 			menu.Items.Add("Move up", null, (s, e) => { var p = passes[index]; passes.RemoveAt(index); passes.Insert(index - 1, p); selectedPass = index - 1; ApplyPlan(passes); }).Enabled = index > 0;
 			menu.Items.Add("Move down", null, (s, e) => { var p = passes[index]; passes.RemoveAt(index); passes.Insert(index + 1, p); selectedPass = index + 1; ApplyPlan(passes); }).Enabled = index < passes.Count - 1;
 			menu.Items.Add("Remove", null, (s, e) => { passes.RemoveAt(index); selectedPass = 0; ApplyPlan(passes); }).Enabled = passes.Count > 1;
-			menu.Items.Add(new ToolStripSeparator());
-			menu.Items.Add("All pass settings...", null, (s, e) => ConnectionForm.OpenJobEditor());
+			menu.Show(anchor, new Point(0, anchor.Height));
+		}
+
+		/// <summary>Reorder, duplicate or remove an operation; the job rebuilds straight away.</summary>
+		private void ShowOperationMenu(Control anchor, int index)
+		{
+			var ops = Core.LoadedFile.Operations.Select(o => o.WithSettings(o.Name, o.Repeats, o.Settings, o.Enabled)).ToList();
+			Action<List<JobOperation>, int, string> rebuild = (list, select, change) =>
+			{
+				if (!Core.CanConfigurePasses || Core.JobEditorOpen || shellBusy) return;
+				shellBusy = true;
+				boundsCache.Clear();
+				try
+				{
+					Core.RebuildOperations(list, error =>
+					{
+						shellBusy = false;
+						if (error != null) ShowShellError(error.Message);
+						else selectedObject = select;
+						RebuildShellContent();
+						RefreshShell();
+					});
+				}
+				catch (InvalidOperationException ex) { shellBusy = false; ShowShellError(ex.Message); }
+			};
+			var menu = new ContextMenuStrip { Renderer = MMn.Renderer };
+			menu.Items.Add("Move up", null, (s, e) => { var o = ops[index]; ops.RemoveAt(index); ops.Insert(index - 1, o); rebuild(ops, index - 1, "Move " + o.Name); }).Enabled = index > 0;
+			menu.Items.Add("Move down", null, (s, e) => { var o = ops[index]; ops.RemoveAt(index); ops.Insert(index + 1, o); rebuild(ops, index + 1, "Move " + o.Name); }).Enabled = index < ops.Count - 1;
+			menu.Items.Add("Duplicate", null, (s, e) => { var o = ops[index]; ops.Insert(index + 1, o.WithSettings(o.Name + " copy", o.Repeats, o.Settings, o.Enabled)); rebuild(ops, index + 1, "Duplicate " + o.Name); });
+			menu.Items.Add("Remove", null, (s, e) => { var o = ops[index]; ops.RemoveAt(index); rebuild(ops, 0, "Remove " + o.Name); }).Enabled = ops.Count > 1;
 			menu.Show(anchor, new Point(0, anchor.Height));
 		}
 

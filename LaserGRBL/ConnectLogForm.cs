@@ -95,6 +95,22 @@ namespace LaserGRBL
 		/// <summary>The command log and manual command box.</summary>
 		internal Control ConsoleControls { get { return GBCommands; } }
 
+		internal bool ConsoleStyled { get; private set; }
+
+		/// <summary>Dark console colours for the modern layout.</summary>
+		internal void StyleConsole(Color log, Color input, Color text, Color hint)
+		{
+			ConsoleStyled = true;
+			CmdLog.BackOverride = log;
+			CmdLog.Invalidate();
+			GBCommands.BackColor = tableLayoutPanel6.BackColor = log;
+			TxtManualCommand.BackColor = input;
+			TxtManualCommand.ForeColor = text;
+			TxtManualCommand.WaterMarkColor = hint;
+			TxtManualCommand.WaterMarkActiveColor = hint;
+			TimerUpdate();
+		}
+
 		internal bool UsesSerialPort
 		{
 			get { return currentWrapper == ComWrapper.WrapperType.UsbSerial || currentWrapper == ComWrapper.WrapperType.UsbSerial2 || currentWrapper == ComWrapper.WrapperType.RJCPSerial; }
@@ -560,7 +576,15 @@ namespace LaserGRBL
 			}
 
 			bool old = TxtManualCommand.Enabled;
-			TxtManualCommand.Enabled = Core.CanSendManualCommand;
+			if (ConsoleStyled)
+			{
+				// Disabled text boxes paint light grey; stay enabled and read-only so the dark style holds.
+				TxtManualCommand.Enabled = true;
+				TxtManualCommand.ReadOnly = !Core.CanSendManualCommand;
+				TxtManualCommand.WaterMark = Core.CanSendManualCommand ? "Type a G-code command and press Enter" : "Connect a laser to send commands";
+			}
+			else
+				TxtManualCommand.Enabled = Core.CanSendManualCommand;
 			//if (old == false && TxtManualCommand.Enabled == true)
 			//	TxtManualCommand.Focus();
 

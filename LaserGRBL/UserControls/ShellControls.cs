@@ -63,11 +63,23 @@ namespace LaserGRBL.UserControls
 						for (int i = -1; i <= 1; i++) g.DrawLine(pen, x + w * .2f, cy + i * h * .25f, x + w * .8f, cy + i * h * .25f);
 						break;
 					case ShellIcon.Gear:
-						g.DrawEllipse(pen, cx - w * .17f, cy - h * .17f, w * .34f, h * .34f);
-						for (int i = 0; i < 8; i++)
 						{
-							double a = i * Math.PI / 4;
-							g.DrawLine(pen, cx + (float)Math.Cos(a) * w * .28f, cy + (float)Math.Sin(a) * h * .28f, cx + (float)Math.Cos(a) * w * .42f, cy + (float)Math.Sin(a) * h * .42f);
+							// A cog: eight square teeth around a ring, with a hole in the middle.
+							var outline = new List<PointF>();
+							const int teeth = 8;
+							float outer = w * .46f, inner = w * .34f;
+							for (int i = 0; i < teeth; i++)
+							{
+								double a = i * 2 * Math.PI / teeth, half = Math.PI / teeth * .55;
+								foreach (var step in new[] { -half * 1.6, -half, half, half * 1.6 })
+								{
+									bool tooth = Math.Abs(step) < half * 1.2;
+									float radius = tooth ? outer : inner;
+									outline.Add(new PointF(cx + (float)Math.Cos(a + step) * radius, cy + (float)Math.Sin(a + step) * radius));
+								}
+							}
+							g.DrawPolygon(pen, outline.ToArray());
+							g.DrawEllipse(pen, cx - w * .13f, cy - h * .13f, w * .26f, h * .26f);
 						}
 						break;
 					case ShellIcon.Layers:
@@ -639,20 +651,24 @@ namespace LaserGRBL.UserControls
 		internal PassCard()
 		{
 			SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-			Height = 66;
+			Height = 80;
 			Margin = new Padding(0, 2, 0, 4);
 			BackColor = ShellPalette.Surface;
 			Menu.AccessibleName = "Pass options";
+			Power.AccessibleName = "Power";
+			Speed.AccessibleName = "Speed";
+			Scan.AccessibleName = "Scan direction";
 			Controls.AddRange(new Control[] { Menu, Power, Speed, Scan });
 		}
+
+		private const int CaptionTop = 30, PickerTop = 46;
 
 		protected override void OnLayout(LayoutEventArgs levent)
 		{
 			Menu.Location = new Point(Width - Menu.Width - 6, 6);
-			int y = 34;
-			Power.SetBounds(24, y, 70, 24);
-			Speed.SetBounds(100, y, 82, 24);
-			Scan.SetBounds(188, y, Math.Max(60, Width - 188 - 8), 24);
+			Power.SetBounds(24, PickerTop, 72, 24);
+			Speed.SetBounds(102, PickerTop, 86, 24);
+			Scan.SetBounds(194, PickerTop, Math.Max(40, Width - 194 - 8), 24);
 		}
 
 		protected override void OnPaint(PaintEventArgs e)
@@ -667,6 +683,12 @@ namespace LaserGRBL.UserControls
 				g.FillPath(b, path);
 				g.DrawPath(p, path);
 			}
+			// Small captions so it's clear which picker is which.
+			foreach (var picker in new[] { Power, Speed, Scan })
+				if (picker.Visible)
+					TextRenderer.DrawText(g, picker.AccessibleName == "Scan direction" ? "Scan" : picker.AccessibleName, ShellPalette.Small,
+						new Rectangle(picker.Left + (picker.Plain ? 0 : 1), CaptionTop, picker.Width, 14), ShellPalette.Faint,
+						(picker.Plain ? TextFormatFlags.Right : TextFormatFlags.Left) | TextFormatFlags.Top);
 			ShellIcons.Draw(g, ShellIcon.Grip, new Rectangle(4, 8, 16, 16), ShellPalette.Faint);
 			TextRenderer.DrawText(g, Number, ShellPalette.UiFont, new Rectangle(24, 6, 24, 20), ShellPalette.Muted, TextFormatFlags.VerticalCenter);
 			int timeWidth = string.IsNullOrEmpty(Time) ? 0 : TextRenderer.MeasureText(Time, ShellPalette.Small).Width;

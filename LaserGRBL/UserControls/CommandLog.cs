@@ -31,9 +31,12 @@ namespace LaserGRBL.UserControls
 		public void SetCom(GrblCore core)
 		{ mCom = core; }
 
+		/// <summary>Background to use instead of the colour scheme's log colour, for the modern layout.</summary>
+		public Color? BackOverride { get; set; }
+
 		protected override void OnPaintBackground(PaintEventArgs e)
 		{
-			e.Graphics.Clear(ColorScheme.LogBackColor);
+			e.Graphics.Clear(BackOverride ?? ColorScheme.LogBackColor);
 		}
 
 		protected override void OnPaint(PaintEventArgs e)

@@ -304,3 +304,6 @@ $RECYCLE.BIN/
 setup.exe
 install.exe
 updte.bat
+
+# Windows cache files a tool wrote here with an unexpanded %SystemDrive%
+%SystemDrive%/

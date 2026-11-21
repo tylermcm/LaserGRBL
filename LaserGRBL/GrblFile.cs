@@ -32,6 +32,13 @@ namespace LaserGRBL
 		private List<GrblCommand> list = new List<GrblCommand>();
 		private ProgramRange mRange = new ProgramRange();
 		private TimeSpan mEstimatedTotalTime;
+		private List<JobOperation> mOperations = new List<JobOperation>();
+		private int mOperationCommandCount;
+		private readonly List<JobPassSection> mRasterSections = new List<JobPassSection>();
+		internal IList<JobOperation> Operations
+		{
+			get { return mOperationCommandCount == list.Count ? mOperations.AsReadOnly() : new List<JobOperation>().AsReadOnly(); }
+		}
 		public List<GrblCommand> Commands => list;
 		private Thread mLoadingThread = null;
 
@@ -48,6 +55,7 @@ namespace LaserGRBL
 
         private void ClearList()
         {
+			ClearOperationLayout();
             foreach (GrblCommand command in list)
             {
                 command.Dispose();
@@ -55,7 +63,51 @@ namespace LaserGRBL
             list.Clear();
         }
 
-        public void SaveGCODE(string filename, bool header, bool footer, bool between, int cycles, bool useLFLineEndings, GrblCore core)
+		private void ClearOperationLayout()
+		{
+			mOperations = new List<JobOperation>();
+			mOperationCommandCount = 0;
+			mRasterSections.Clear();
+		}
+
+		internal GrblFile BuildOperations(IEnumerable<JobOperation> operations)
+		{
+			var result = new GrblFile();
+			var inputs = operations.ToArray();
+			long budget = Math.Max(2000000L, list.Count + inputs.Sum(operation => operation.Source.LongLength + (operation.Contours?.Length ?? 1) * 8L));
+			foreach (var input in inputs)
+			{
+				long repeatsOverhead = input.RepeatContours && input.Contours != null && input.Contours.Length > 0
+					? (input.Contours[0] + 4L) * input.Contours.Length : 4L;
+				if (input.Enabled && result.list.Count + (input.Source.Length + repeatsOverhead) * input.Repeats > budget)
+					throw new InvalidOperationException("This operation list would generate too many commands. Reduce the repeats or raster resolution.");
+				var operation = input.WithSettings(input.Name, input.Repeats, input.Settings, input.Enabled);
+				operation.AppendTo(result.list);
+				result.mOperations.Add(operation);
+			}
+			if (result.list.Count == 0)
+				throw new InvalidOperationException("Enable at least one operation.");
+			result.Analyze();
+			result.mOperationCommandCount = result.list.Count;
+			return result;
+		}
+
+		private void InstallGeneratedOperation(JobOperation operation, string filename, bool append)
+		{
+			if (operation.Source.Length == 0) throw new InvalidOperationException("The import generated no commands.");
+			if (append && list.Count > 0 && Operations.Count == 0)
+			{
+				// Existing arbitrary G-code can depend on modal state. Leave it in the ordinary append workflow.
+				var source = new GrblFile { list = operation.Source.ToList() };
+				InstallRasterJob(source, filename, true, null);
+				return;
+			}
+			var operations = append ? Operations.ToList() : new List<JobOperation>();
+			operations.Add(operation);
+			InstallRasterJob(BuildOperations(operations), filename, false, null);
+		}
+
+        public void SaveGCODE(string filename, bool header, bool footer, bool between, int cycles, bool useLFLineEndings, GrblCore core, JobPassPlan passPlan = null)
 		{
 			try
 			{
@@ -65,20 +117,23 @@ namespace LaserGRBL
 						sw.NewLine = "\n";
 
 					if (header)
-						EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomHeader", GrblCore.GCODE_STD_HEADER));
+						EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomHeader", GrblCore.GCODE_STD_HEADER), passPlan == null ? null : passPlan[0]);
 
+					if (passPlan != null) cycles = passPlan.Count;
 					for (int i = 0; i < cycles; i++)
 					{
+						JobPass pass = passPlan == null ? null : passPlan[i];
+						if (pass != null) sw.WriteLine("; Pass {0}/{1}: {2}", i + 1, cycles, pass);
 						foreach (GrblCommand cmd in list)
-							sw.WriteLine(cmd.Command);
+							sw.WriteLine(cmd.CloneForPass(pass).Command);
 
 
 						if (between && i < cycles - 1)
-							EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomPasses", GrblCore.GCODE_STD_PASSES));
+							EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomPasses", GrblCore.GCODE_STD_PASSES), passPlan == null ? null : passPlan[i + 1]);
 					}
 
 					if (footer)
-						EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomFooter", GrblCore.GCODE_STD_FOOTER));
+						EvaluateAddLines(core, sw, Settings.GetObject("GCode.CustomFooter", GrblCore.GCODE_STD_FOOTER), passPlan == null ? null : passPlan[cycles - 1]);
 
 					sw.Close();
 				}
@@ -86,7 +141,7 @@ namespace LaserGRBL
 			catch { }
 		}
 
-		private static void EvaluateAddLines(GrblCore core, System.IO.StreamWriter sw, string lines)
+		private static void EvaluateAddLines(GrblCore core, System.IO.StreamWriter sw, string lines, JobPass pass = null)
 		{
 			string[] arr = lines.Split(new string[] { Environment.NewLine }, StringSplitOptions.None);
 			foreach (string line in arr)
@@ -95,7 +150,7 @@ namespace LaserGRBL
 				{
 					string command = core.EvaluateExpression(line);
 					if (!string.IsNullOrEmpty(command))
-						sw.WriteLine(command);
+						sw.WriteLine(new GrblCommand(command, 0, true).CloneForPass(pass).Command);
 				}
 			}
 		}
@@ -131,6 +186,8 @@ namespace LaserGRBL
 
 				if (!append)
                     ClearList();
+				else
+					ClearOperationLayout();
 
 				mRange.ResetRange();
 				if (System.IO.File.Exists(filename))
@@ -158,36 +215,22 @@ namespace LaserGRBL
         {
             SafeLoadFile(() =>
             {
-				RiseOnFileLoading(filename);
-
-				long start = Tools.HiResTimer.TotalMilliseconds;
-
-				if (!append)
-                    ClearList();
-
-				mRange.ResetRange();
-
-				SvgConverter.GCodeFromSVG converter = new SvgConverter.GCodeFromSVG();
+				SvgConverter.GCodeFromSVG converter = new SvgConverter.GCodeFromSVG { RecordContours = true };
 				converter.GCodeXYFeed = Settings.GetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", 1000);
 				converter.UseLegacyBezier = !Settings.GetObject($"Vector.UseSmartBezier", true);
 
 				string gcode = converter.convertFromFile(filename, core, filter);
 				string[] lines = gcode.Split(Environment.NewLine.ToCharArray(), StringSplitOptions.RemoveEmptyEntries);
-				foreach (string l in lines)
+				var commands = new List<GrblCommand>();
+				var contours = new List<int>();
+				foreach (string line in lines)
 				{
-					string line = l;
-					if ((line = line.Trim()).Length > 0)
-					{
-						GrblCommand cmd = new GrblCommand(line);
-						if (!cmd.IsEmpty)
-							list.Add(cmd);
-					}
+					if (line == SvgConverter.GCodeFromSVG.ContourMarker) contours.Add(commands.Count);
+					else if (!string.IsNullOrWhiteSpace(line)) commands.Add(new GrblCommand(line));
 				}
-
-				Analyze();
-				long elapsed = Tools.HiResTimer.TotalMilliseconds - start;
-
-				RiseOnFileLoaded(filename, elapsed);
+				var operation = JobOperation.FromImport(filename, commands);
+				operation.Contours = contours.ToArray();
+				InstallGeneratedOperation(operation, filename, append);
             });
         }
 
@@ -209,9 +252,12 @@ namespace LaserGRBL
 			public bool Fast(L2LConf c)
 			{ return c.pwm ? mColor == 0 : mColor <= 125; }
 
-			public string formatnumber(int number, float offset, L2LConf c)
+			public string FormatCoordinate(int number, L2LConf c, bool xAxis)
 			{
-				double dval = Math.Round(number / (c.vectorfilling ? c.fres : c.res) + offset, 3);
+				double offset = xAxis ? c.oX : c.oY;
+				double? pitch = xAxis ? c.pitchX : c.pitchY;
+				double distance = pitch.HasValue ? number * pitch.Value : number / (c.vectorfilling ? c.fres : c.res);
+				double dval = Math.Round(distance + offset, 3);
 				return dval.ToString(System.Globalization.CultureInfo.InvariantCulture);
 			}
 
@@ -241,9 +287,9 @@ namespace LaserGRBL
 				cumX += mPixLen;
 
 				if (c.pwm)
-					return string.Format("X{0} {1}", formatnumber(cumX, c.oX, c), FormatLaserPower(mColor, c));
+					return string.Format("X{0} {1}", FormatCoordinate(cumX, c, true), FormatLaserPower(mColor, c));
 				else
-					return string.Format("X{0} {1}", formatnumber(cumX, c.oX, c), Fast(c) ? c.lOff : c.lOn);
+					return string.Format("X{0} {1}", FormatCoordinate(cumX, c, true), Fast(c) ? c.lOff : c.lOn);
 			}
 		}
 
@@ -256,9 +302,9 @@ namespace LaserGRBL
 				cumY += mPixLen;
 
 				if (c.pwm)
-					return string.Format("Y{0} {1}", formatnumber(cumY, c.oY, c), FormatLaserPower(mColor, c));
+					return string.Format("Y{0} {1}", FormatCoordinate(cumY, c, false), FormatLaserPower(mColor, c));
 				else
-					return string.Format("Y{0} {1}", formatnumber(cumY, c.oY, c), Fast(c) ? c.lOff : c.lOn);
+					return string.Format("Y{0} {1}", FormatCoordinate(cumY, c, false), Fast(c) ? c.lOff : c.lOn);
 			}
 		}
 
@@ -272,9 +318,9 @@ namespace LaserGRBL
 				cumY -= mPixLen;
 
 				if (c.pwm)
-					return string.Format("X{0} Y{1} {2}", formatnumber(cumX, c.oX, c), formatnumber(cumY, c.oY, c), FormatLaserPower(mColor, c));
+					return string.Format("X{0} Y{1} {2}", FormatCoordinate(cumX, c, true), FormatCoordinate(cumY, c, false), FormatLaserPower(mColor, c));
 				else
-					return string.Format("X{0} Y{1} {2}", formatnumber(cumX, c.oX, c), formatnumber(cumY, c.oY, c), Fast(c) ? c.lOff : c.lOn);
+					return string.Format("X{0} Y{1} {2}", FormatCoordinate(cumX, c, true), FormatCoordinate(cumY, c, false), Fast(c) ? c.lOff : c.lOn);
 			}
 		}
 
@@ -288,7 +334,7 @@ namespace LaserGRBL
 					throw new Exception();
 
 				cumY += mPixLen;
-				return string.Format("Y{0}", formatnumber(cumY, c.oY, c));
+				return string.Format("Y{0}", FormatCoordinate(cumY, c, false));
 			}
 
 			public override bool IsSeparator
@@ -305,7 +351,7 @@ namespace LaserGRBL
 					throw new Exception();
 
 				cumX += mPixLen;
-				return string.Format("X{0}", formatnumber(cumX, c.oX, c));
+				return string.Format("X{0}", FormatCoordinate(cumX, c, true));
 			}
 
 			public override bool IsSeparator
@@ -487,8 +533,60 @@ namespace LaserGRBL
 				OnFileLoaded(elapsed, filename);
 		}
 
-		private void RiseOnFileLoading(string filename)
+		internal RasterConverter.ImageProcessor RasterSource { get; private set; }
+		private readonly List<RasterConverter.ImageProcessor> rasterUndo = new List<RasterConverter.ImageProcessor>();
+		private readonly List<RasterConverter.ImageProcessor> rasterRedo = new List<RasterConverter.ImageProcessor>();
+
+		internal enum RasterEdit { Apply, Undo, Redo }
+		internal bool CanUndoRasterEdit { get { return rasterUndo.Count > 0; } }
+		internal bool CanRedoRasterEdit { get { return rasterRedo.Count > 0; } }
+
+		internal RasterConverter.ImageProcessor GetRasterHistory(RasterEdit edit)
 		{
+			var history = edit == RasterEdit.Undo ? rasterUndo : rasterRedo;
+			return history.Count == 0 ? null : history[history.Count - 1];
+		}
+
+		private static void ClearRasterHistory(List<RasterConverter.ImageProcessor> history)
+		{
+			foreach (var entry in history) entry.Dispose();
+			history.Clear();
+		}
+
+		internal void ApplyRasterEdit(GrblFile prepared, RasterConverter.ImageProcessor source, RasterEdit edit)
+		{
+			if (CheckInUse(false)) throw new InvalidOperationException(Strings.AlreadyLoading);
+			var previous = RasterSource;
+			if (edit == RasterEdit.Apply)
+			{
+				ClearRasterHistory(rasterRedo);
+				rasterUndo.Add(previous);
+				if (rasterUndo.Count > 5)
+				{
+					rasterUndo[0].Dispose();
+					rasterUndo.RemoveAt(0);
+				}
+			}
+			else
+			{
+				var from = edit == RasterEdit.Undo ? rasterUndo : rasterRedo;
+				var to = edit == RasterEdit.Undo ? rasterRedo : rasterUndo;
+				from.RemoveAt(from.Count - 1);
+				to.Add(previous);
+			}
+			RasterSource = source;
+			InstallEditableRasterJob(prepared, source.SourceFileName, source);
+		}
+
+		private void RiseOnFileLoading(string filename, RasterConverter.ImageProcessor rasterSource = null)
+		{
+			if (RasterSource != rasterSource)
+			{
+				ClearRasterHistory(rasterUndo);
+				ClearRasterHistory(rasterRedo);
+				RasterSource?.Dispose();
+				RasterSource = rasterSource;
+			}
 			if (OnFileLoading != null)
 				OnFileLoading(0, filename);
 		}
@@ -496,6 +594,8 @@ namespace LaserGRBL
 		public class L2LConf
 		{
 			public double res;
+			internal double? pitchX;
+			internal double? pitchY;
 			public float oX;
 			public float oY;
 			public int markSpeed;
@@ -515,47 +615,114 @@ namespace LaserGRBL
 		public void LoadImageL2L(Bitmap bmp, string filename, L2LConf c, bool append, GrblCore core)
         {
             if (CheckInUse()) return;
-
-            skipcmd = Settings.GetObject("Disable G0 fast skip", false) ? "G1" : "G0";
-
 			RiseOnFileLoading(filename);
-
-			bmp.RotateFlip(RotateFlipType.RotateNoneFlipY);
-
 			long start = Tools.HiResTimer.TotalMilliseconds;
-
 			if (!append)
                 ClearList();
 
-			mRange.ResetRange();
+			AppendRasterPath(bmp, c);
+			Analyze();
+			RiseOnFileLoaded(filename, Tools.HiResTimer.TotalMilliseconds - start);
+		}
 
-			//absolute
-			//list.Add(new GrblCommand("G90")); //(Moved to custom Header)
+		internal void AppendRasterPass(Bitmap bitmap, L2LConf config, SizeF size, JobPass pass)
+		{
+			config.pitchX = (double)size.Width / bitmap.Width;
+			config.pitchY = (double)size.Height / bitmap.Height;
+			if (config.dir == RasterConverter.ImageProcessor.Direction.NewReverseDiagonal)
+			{
+				// Reflect both the input and the path, so the image stays in its original orientation.
+				bitmap.RotateFlip(RotateFlipType.RotateNoneFlipX);
+				config.pitchX = -config.pitchX;
+				config.oX += size.Width;
+				config.dir = RasterConverter.ImageProcessor.Direction.Diagonal;
+			}
+			else if (!RasterFilling(config.dir))
+				throw new ArgumentException("Choose a raster scan direction.", "config");
 
-			//move fast to offset (or slow if disable G0) and set mark speed
+			int start = list.Count;
+			list.Add(new GrblCommand(config.lOff));
+			list.Add(new GrblCommand("G90"));
+			AppendRasterPath(bitmap, config);
+			for (int i = start; i < list.Count; i++)
+				list[i] = list[i].CloneForPass(pass);
+			if (pass.LinesPerMm > 0)
+				mRasterSections.Add(new JobPassSection(string.Format("Pass {0} · {1} · {2:0.###} lines/mm · {3}",
+					mRasterSections.Count + 1, GrblCore.TranslateEnum(pass.Direction), pass.LinesPerMm, pass), start, list.Count));
+		}
+
+		internal void LoadRasterPasses(GrblFile source, string filename, bool append, RasterConverter.ImageProcessor rasterSource = null)
+		{
+			if (CheckInUse(false)) throw new InvalidOperationException(Strings.AlreadyLoading);
+			if (!append && rasterSource != null)
+				InstallEditableRasterJob(source, filename, rasterSource);
+			else
+			{
+				var operation = JobOperation.FromImport(filename, source.list);
+				if (source.mRasterSections.Count > 0) operation.Passes = source.mRasterSections.ToArray();
+				InstallGeneratedOperation(operation, filename, append);
+			}
+		}
+
+		private void InstallEditableRasterJob(GrblFile source, string filename, RasterConverter.ImageProcessor rasterSource)
+		{
+			var operation = JobOperation.FromImport(filename, source.list);
+			if (source.mRasterSections.Count > 0)
+			{
+				operation.Passes = source.mRasterSections.ToArray();
+				operation.CompiledPasses.AddRange(operation.Passes);
+			}
+			operation.End = source.list.Count;
+			source.mOperations.Add(operation);
+			source.mOperationCommandCount = source.list.Count;
+			InstallRasterJob(source, filename, false, rasterSource);
+		}
+
+		internal void ApplyOperations(GrblFile prepared)
+		{
+			if (CheckInUse(false)) throw new InvalidOperationException(Strings.AlreadyLoading);
+			InstallRasterJob(prepared, prepared.mOperations[0].Name, false, null);
+		}
+
+		internal void LoadOperationsProject(JobOperation.Saved[] data, string filename)
+		{
+			SafeLoadFile(() => InstallRasterJob(BuildOperations(data.Select(entry => entry.Restore())), filename, false, null));
+		}
+
+		private void InstallRasterJob(GrblFile source, string filename, bool append, RasterConverter.ImageProcessor rasterSource)
+		{
+			long start = Tools.HiResTimer.TotalMilliseconds;
+			RiseOnFileLoading(filename, rasterSource);
+			if (append)
+			{
+				ClearOperationLayout();
+				list.AddRange(source.list);
+				Analyze();
+			}
+			else
+			{
+				ClearList();
+				list = source.list;
+				mRange = source.mRange;
+				mEstimatedTotalTime = source.mEstimatedTotalTime;
+				mOperations = source.mOperations;
+				mOperationCommandCount = source.mOperationCommandCount;
+			}
+			RiseOnFileLoaded(filename, Tools.HiResTimer.TotalMilliseconds - start);
+		}
+
+		internal void AppendRasterPath(Bitmap bmp, L2LConf c)
+		{
+			skipcmd = Settings.GetObject("Disable G0 fast skip", false) ? "G1" : "G0";
+			bmp.RotateFlip(RotateFlipType.RotateNoneFlipY);
 			list.Add(new GrblCommand(String.Format("{0} X{1} Y{2} F{3}", skipcmd, formatnumber(c.oX), formatnumber(c.oY), c.markSpeed)));
 			if (c.pwm)
 				list.Add(new GrblCommand(String.Format("{0} S0", c.lOn))); //laser on and power to zero
 			else
 				list.Add(new GrblCommand($"{c.lOff} S{GrblCore.Configuration.MaxPWM}")); //laser off and power to maxpower
 
-			//set speed to markspeed						
-			// For marlin, need to specify G1 each time :
-			//list.Add(new GrblCommand(String.Format("G1 F{0}", c.markSpeed)));
-			//list.Add(new GrblCommand(String.Format("F{0}", c.markSpeed))); //replaced by the first move to offset and set speed
-
 			ImageLine2Line(bmp, c);
-
-			//laser off
 			list.Add(new GrblCommand(c.lOff));
-
-			//move fast to origin
-			//list.Add(new GrblCommand("G0 X0 Y0")); //moved to custom footer
-
-			Analyze();
-			long elapsed = Tools.HiResTimer.TotalMilliseconds - start;
-
-			RiseOnFileLoaded(filename, elapsed);
 		}
 
 		internal void GenerateCuttingTest(int f_col, int f_start, int f_end, int p_start, int p_end, int s_fixed, int f_text, int s_text, string title, string ton)
@@ -637,6 +804,18 @@ namespace LaserGRBL
 			long elapsed = Tools.HiResTimer.TotalMilliseconds - start;
 
 			RiseOnFileLoaded(filename, elapsed);
+		}
+
+		internal void LoadCalibrationPattern(string filename, List<GrblCommand> commands)
+		{
+			if (CheckInUse()) return;
+			RiseOnFileLoading(filename);
+			long start = Tools.HiResTimer.TotalMilliseconds;
+			ClearList();
+			mRange.ResetRange();
+			list.AddRange(commands);
+			Analyze();
+			RiseOnFileLoaded(filename, Tools.HiResTimer.TotalMilliseconds - start);
 		}
 
 		public void GenerateGreyscaleTest(int f_row, int s_col, int f_start, int f_end, int s_start, int s_end, int x_size, int y_size, double resolution, int f_grid, int s_grid, string title, int f_text, int s_text, string ton)
@@ -1444,7 +1623,7 @@ namespace LaserGRBL
 
 		}
 
-		private void Analyze() //analyze the file and build global range and timing for each command
+		internal void Analyze() //analyze the file and build global range and timing for each command
 		{
 			GrblCommand.StatePositionBuilder spb = new GrblCommand.StatePositionBuilder();
 

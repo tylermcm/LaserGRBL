@@ -292,6 +292,7 @@ namespace LaserGRBL
 		private int mAutoBufferSize = DEFAULT_BUFFER_SIZE;
 		private GPoint mMPos;
 		private GPoint mWCO;
+		private bool mHomedSinceConnect;
 		private int mGrblBlocks = -1;
 		private int mGrblBuffer = -1;
 		private int mFailedConnection = 0;
@@ -311,6 +312,13 @@ namespace LaserGRBL
 		private int mTarOvPower;
 
 		private decimal mLoopCount = 1;
+		private JobPassPlan mJobPassPlan;
+		private int mPassIndex;
+		private bool mPassSequenceStarted;
+		internal const string ProjectRasterPassesKey = "RasterPasses";
+		internal const string ProjectRasterSizeKey = "RestoreRasterSize";
+		internal bool RestoringRasterSize { get; private set; }
+		internal JobPassPlan ProjectRasterPasses { get; private set; }
 
 		protected Tools.PeriodicEventTimer QueryTimer;
 
@@ -329,6 +337,7 @@ namespace LaserGRBL
 
 		private string mDetectedIP = null;
 		private bool mDoingSend = false;
+		private bool mRebuildingRaster;
 
         public RetainedSetting<bool> ShowLaserOffMovements { get; } = new RetainedSetting<bool>("ShowLaserOffMovements", true);
         public RetainedSetting<bool> ShowExecutedCommands { get; } = new RetainedSetting<bool>("ShowExecutedCommands", true);
@@ -343,12 +352,15 @@ namespace LaserGRBL
 			System.Threading.ThreadPool.QueueUserWorkItem(GetCH340Version);
 		}
 
+		private readonly PreviewForm jobPreview;
+
         public GrblCore(System.Windows.Forms.Control syncroObject, PreviewForm cbform, JogForm jogform)
 		{
 			if (Type != Firmware.Grbl) Logger.LogMessage("Program", "Load {0} core", Type);
 
 			SetStatus(MacStatus.Disconnected);
 			syncro = syncroObject;
+			jobPreview = cbform;
 			com = new ComWrapper.UsbSerial();
 
 			debugLastStatusDelay = new ElapsedFromEvent();
@@ -498,6 +510,11 @@ namespace LaserGRBL
 					mMachineStatus = newStatus;
 
 					Logger.LogMessage("SetStatus", "Machine status [{0}]", mMachineStatus);
+					// After an alarm, reset or reconnect the machine position can't be trusted until the next successful $H.
+					if (newStatus == MacStatus.Alarm || newStatus == MacStatus.Disconnected || newStatus == MacStatus.Connecting)
+						mHomedSinceConnect = false;
+					else if (oldStatus == MacStatus.Home && (newStatus == MacStatus.Idle || newStatus == MacStatus.Run))
+						mHomedSinceConnect = true;
 					if (oldStatus == MacStatus.Connecting && newStatus == MacStatus.Disconnected)
 						mFailedConnection++;
 					if (oldStatus == MacStatus.Connecting && newStatus != MacStatus.Disconnected)
@@ -633,6 +650,14 @@ namespace LaserGRBL
 		void RiseOnFileLoaded(long elapsed, string filename)
 		{
 			mTP.Reset(true);
+			if (mJobPassPlan != null)
+			{
+				mJobPassPlan = null;
+				mPassIndex = 0;
+				mPassSequenceStarted = false;
+				LoopCount = 1;
+			}
+			if (HasJobOperations && LoopCount != 1) LoopCount = 1;
 
 			if (OnFileLoaded != null)
 				OnFileLoaded?.Invoke(elapsed, filename);
@@ -652,7 +677,12 @@ namespace LaserGRBL
 		public static readonly List<string> ProjectFileExtensions = new List<string>(new string[] { ".lps" });
 		public void OpenFile(string filename = null, bool append = false)
 		{
-			if (!CanLoadNewFile) return;
+			OpenFile(filename, append, jobPreview);
+		}
+
+		private void OpenFile(string filename, bool append, PreviewForm preview)
+		{
+			if (!CanOpenJobFile) return;
 
 			try
 			{
@@ -687,6 +717,7 @@ namespace LaserGRBL
 				}
 
 				if (filename == null) return;
+				if (append) Project.PreserveRasterBeforeAppend(file.RasterSource);
 
 				Logger.LogMessage("OpenFile", "Open {0}", filename);
 				Settings.SetObject("Core.LastOpenFile", filename);
@@ -695,7 +726,7 @@ namespace LaserGRBL
 				{
 					try
 					{
-						RasterConverter.RasterToLaserForm.CreateAndShowDialog(this, filename, append);
+						RasterConverter.RasterToLaserForm.OpenImport(this, filename, append, preview);
 						UsageCounters.RasterFile++;
 					}
 					catch (Exception ex)
@@ -708,7 +739,7 @@ namespace LaserGRBL
 					{
 						try
 						{
-							SvgConverter.SvgToGCodeForm.CreateAndShowDialog(this, filename, append);
+							SvgConverter.SvgToGCodeForm.OpenImport(this, filename, append, preview);
 							UsageCounters.SvgFile++;
 						}
 						catch (Exception ex)
@@ -741,10 +772,9 @@ namespace LaserGRBL
 
 						try
 						{
-							RasterConverter.RasterToLaserForm.CreateAndShowDialog(this, bmpname, append);
+							RasterConverter.RasterToLaserForm.OpenImport(this, bmpname, append, preview,
+								() => System.IO.File.Delete(bmpname));
 							UsageCounters.RasterFile++;
-							if (System.IO.File.Exists(bmpname))
-								System.IO.File.Delete(bmpname);
 						}
 						catch (Exception ex)
 						{ Logger.LogException("SvgBmpImport", ex); }
@@ -767,30 +797,17 @@ namespace LaserGRBL
 				else if (ProjectFileExtensions.Contains(System.IO.Path.GetExtension(filename).ToLowerInvariant()))  //load LaserGRBL project
 				{
 					var project = Project.LoadProject(filename);
-
-					for (var i = 0; i < project.Count; i++)
+					object operationData;
+					if (project.Count == 1 && project[0].TryGetValue(Project.OperationsKey, out operationData) && operationData is JobOperation.Saved[])
 					{
-						var settings = project[i];
-
-						// Save image temporary
-						var imageFilepath = $"{System.IO.Path.GetTempPath()}\\{settings["ImageName"]}";
-						Project.SaveImage(settings["ImageBase64"].ToString(), imageFilepath);
-
-						// Restore settings
-						foreach (var setting in settings.Where(setting =>
-							setting.Key != "ImageName" && setting.Key != "ImageBase64"))
-							Settings.SetObject(setting.Key, setting.Value);
-
-						// Open file
-						Settings.SetObject("Core.LastOpenFile", imageFilepath);
-						if (i == 0)
-							ReOpenFile();
+						if (append)
+							MessageBox.Show("Open this operations project as a new job.", "Job operations");
 						else
-							OpenFile(imageFilepath, true);
-
-						// Delete temporary image file
-						System.IO.File.Delete(imageFilepath);
+							file.LoadOperationsProject((JobOperation.Saved[])operationData, filename);
+						return;
 					}
+
+					OpenRasterProject(project, 0, preview);
 				}
 				else
 				{
@@ -800,6 +817,48 @@ namespace LaserGRBL
 			catch (Exception ex)
 			{
 				Logger.LogException("OpenFile", ex);
+			}
+		}
+
+		private void OpenRasterProject(List<Dictionary<string, object>> project, int index, PreviewForm preview)
+		{
+			if (index >= project.Count) return;
+			var settings = project[index];
+			string imageFilepath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), (string)settings["ImageName"]);
+			Project.SaveImage(settings["ImageBase64"].ToString(), imageFilepath);
+			foreach (var setting in settings.Where(setting =>
+				setting.Key != "ImageName" && setting.Key != "ImageBase64" && setting.Key != ProjectRasterPassesKey &&
+				setting.Key != ProjectRasterSizeKey))
+				Settings.SetObject(setting.Key, setting.Value);
+
+			bool append = index != 0;
+			if (append) Project.PreserveRasterBeforeAppend(file.RasterSource);
+			Settings.SetObject("Core.LastOpenFile", imageFilepath);
+			object rasterPasses;
+			settings.TryGetValue(ProjectRasterPassesKey, out rasterPasses);
+			ProjectRasterPasses = rasterPasses as JobPassPlan;
+			RestoringRasterSize = settings.ContainsKey(ProjectRasterSizeKey);
+			try
+			{
+				RasterConverter.RasterToLaserForm.OpenImport(this, imageFilepath, append, preview, () =>
+				{
+					ProjectRasterPasses = null;
+					RestoringRasterSize = false;
+					try
+					{
+						System.IO.File.Delete(imageFilepath);
+						OpenRasterProject(project, index + 1, preview);
+					}
+					catch (Exception ex) { Logger.LogException("OpenProject", ex); }
+				});
+				UsageCounters.RasterFile++;
+			}
+			catch
+			{
+				ProjectRasterPasses = null;
+				RestoringRasterSize = false;
+				System.IO.File.Delete(imageFilepath);
+				throw;
 			}
 		}
 
@@ -816,7 +875,7 @@ namespace LaserGRBL
 			return null;
 		}
 
-		public void SaveProgram(Form parent, bool header, bool footer, bool between, int cycles, bool useLFLineEndings)
+		public void SaveProgram(Form parent, bool header, bool footer, bool between, int cycles, bool useLFLineEndings, JobPassPlan passPlan = null)
 		{
 			if (HasProgram)
 			{
@@ -851,7 +910,7 @@ namespace LaserGRBL
 				}
 
 				if (filename != null)
-					file.SaveGCODE(filename, header, footer, between, cycles, useLFLineEndings, this);
+					file.SaveGCODE(filename, header, footer, between, cycles, useLFLineEndings, this, passPlan);
 			}
 		}
 
@@ -890,7 +949,10 @@ namespace LaserGRBL
 				}
 
 				if (filename != null)
-					Project.StoreSettings(filename);
+				{
+					if (HasJobOperations) Project.StoreOperations(filename, file.Operations);
+					else Project.StoreSettings(filename, file.RasterSource);
+				}
 			}
 		}
 
@@ -1290,8 +1352,14 @@ namespace LaserGRBL
 				{
 					mDoingSend = true;
 
-					if (mTP.Executed == 0 || mTP.Executed == mTP.Target) //mai iniziato oppure correttamente finito
-						RunProgramFromStart(false, true);
+					if ((mTP.Executed == 0 && !mPassSequenceStarted) || mTP.Executed == mTP.Target) //never started or fully completed
+					{
+						bool home;
+						if (ConfirmHomeBeforeRun(parent, out home))
+							RunProgramFromStart(home, true);
+					}
+					else if (mTP.Executed == 0) //interrupted before the current custom pass acknowledged a line
+						RunProgramFromStart(false);
 					else
 						UserWantToContinue(parent);
 				}
@@ -1337,6 +1405,55 @@ namespace LaserGRBL
 			}
 		}
 
+		internal enum HomeBeforeRunDecision { Run, HomeThenRun, Ask }
+
+		internal static bool HomeBeforeFirstRun
+		{
+			get { return Settings.GetObject("Safety.HomeBeforeFirstRun", true); }
+			set { Settings.SetObject("Safety.HomeBeforeFirstRun", value); }
+		}
+
+		internal bool HomedSinceConnect { get { return mHomedSinceConnect; } }
+
+		/// <summary>
+		/// Whether a fresh job should home first. Without a work offset the job runs in machine coordinates, which mean
+		/// nothing until the machine is homed, so homing is always right. With an offset it depends on when the origin was set:
+		/// one stored relative to home (G10/G54) needs homing, but one set by "new zero" (G92) before homing would move.
+		/// </summary>
+		internal static HomeBeforeRunDecision DecideHomeBeforeRun(bool enabled, bool homingEnabled, bool homedSinceConnect, bool hasWorkOffset)
+		{
+			if (!enabled || !homingEnabled || homedSinceConnect) return HomeBeforeRunDecision.Run;
+			return hasWorkOffset ? HomeBeforeRunDecision.Ask : HomeBeforeRunDecision.HomeThenRun;
+		}
+
+		private bool ConfirmHomeBeforeRun(Form parent, out bool home)
+		{
+			home = false;
+			bool homingEnabled = false;
+			try { homingEnabled = Configuration.HomingEnabled; }
+			catch (Exception) { } // configuration not read yet: leave the run as it was
+			switch (DecideHomeBeforeRun(HomeBeforeFirstRun, homingEnabled, mHomedSinceConnect, mWCO != GPoint.Zero))
+			{
+				case HomeBeforeRunDecision.HomeThenRun:
+					Logger.LogMessage("EnqueueProgram", "Not homed since connecting: homing before the first job");
+					home = true;
+					break;
+				case HomeBeforeRunDecision.Ask:
+					var answer = MessageBox.Show(parent,
+						"This machine hasn't been homed since LaserGRBL connected, so its position may be wrong.\n\n" +
+						"Yes: home ($H), then start the job.\n" +
+						"No: start without homing. Choose this if you set the origin with \"Set new zero\" after connecting; homing would move it.\n" +
+						"Cancel: don't start.",
+						"Home before starting?", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1);
+					if (answer == DialogResult.Cancel) return false;
+					home = answer == DialogResult.Yes;
+					break;
+			}
+			// Assume success; an alarm during $H clears this again before the next job.
+			if (home) mHomedSinceConnect = true;
+			return true;
+		}
+
 		private void UserWantToContinue(Form parent)
 		{
 			bool setwco = mWCO == GPoint.Zero && mTP.LastKnownWCO != GPoint.Zero;
@@ -1357,6 +1474,7 @@ namespace LaserGRBL
 
 			lock (this)
 			{
+				if (first) BeginPasses();
 				ClearQueue(true);
 
 				mTP.Reset(first);
@@ -1375,8 +1493,9 @@ namespace LaserGRBL
 
 
 				Logger.LogMessage("EnqueueProgram", "Push File, {0} lines", file.Count);
+				LogPass();
 				foreach (GrblCommand cmd in file)
-					mQueuePtr.Enqueue(cmd.Clone() as GrblCommand);
+					mQueuePtr.Enqueue(cmd.CloneForPass(CurrentPassSettings));
 
 				mTP.JobStart(LoadedFile, mQueuePtr, first);
 				Logger.LogMessage("EnqueueProgram", "Running program, {0} lines", file.Count);
@@ -1386,19 +1505,19 @@ namespace LaserGRBL
 		private void OnJobCycle()
 		{
 			Logger.LogMessage("EnqueueProgram", "Push Passes");
-			ExecuteCustomCode(Settings.GetObject("GCode.CustomPasses", GrblCore.GCODE_STD_PASSES));
+			ExecuteCustomCode(Settings.GetObject("GCode.CustomPasses", GrblCore.GCODE_STD_PASSES), CurrentPassSettings);
 		}
 
 		protected virtual void OnJobBegin()
 		{
 			Logger.LogMessage("EnqueueProgram", "Push Header");
-			ExecuteCustomCode(Settings.GetObject("GCode.CustomHeader", GrblCore.GCODE_STD_HEADER));
+			ExecuteCustomCode(Settings.GetObject("GCode.CustomHeader", GrblCore.GCODE_STD_HEADER), CurrentPassSettings);
 		}
 
 		protected virtual void OnJobEnd()
 		{
 			Logger.LogMessage("EnqueueProgram", "Push Footer");
-			ExecuteCustomCode(Settings.GetObject("GCode.CustomFooter", GrblCore.GCODE_STD_FOOTER));
+			ExecuteCustomCode(Settings.GetObject("GCode.CustomFooter", GrblCore.GCODE_STD_FOOTER), CurrentPassSettings);
 		}
 
 		private void ContinueProgramFromKnown(int position, bool homing, bool setwco)
@@ -1408,6 +1527,7 @@ namespace LaserGRBL
 
 			lock (this)
 			{
+				if (!mPassSequenceStarted) BeginPasses();
 
 				ClearQueue(false); //lascia l'eventuale lista delle cose già mandate, se ce l'hai ancora
 
@@ -1431,7 +1551,7 @@ namespace LaserGRBL
 					spb.AnalyzeCommand(file[i], false);
 
 				mQueuePtr.Enqueue(new GrblCommand("G90")); //absolute coordinate
-				mQueuePtr.Enqueue(new GrblCommand(string.Format("M5 G0 {0} {1} {2} {3} {4}", spb.X, spb.Y, spb.Z, spb.F, spb.S))); //fast go to the computed position with laser off and set speed and power
+				mQueuePtr.Enqueue(new GrblCommand(string.Format("M5 G0 {0} {1} {2} {3} {4}", spb.X, spb.Y, spb.Z, spb.F, spb.S)).CloneForPass(CurrentPassSettings)); //restore this pass's modal power with the laser off
 				mQueuePtr.Enqueue(new GrblCommand(spb.GetSettledModals()));
 
 				mTP.JobContinue(LoadedFile, position, mQueuePtr.Count);
@@ -1440,7 +1560,7 @@ namespace LaserGRBL
 				{
 					if (spb != null) //check the very first movement command and ensure modal MotionMode is settled
 					{
-						GrblCommand cmd = file[i].Clone() as GrblCommand;
+						GrblCommand cmd = file[i].CloneForPass(CurrentPassSettings);
 						cmd.BuildHelper();
 						if (cmd.IsMovement && cmd.G == null)
 							mQueuePtr.Enqueue(new GrblCommand(spb.MotionMode, cmd));
@@ -1451,7 +1571,7 @@ namespace LaserGRBL
 					}
 					else
 					{
-						mQueuePtr.Enqueue(file[i].Clone() as GrblCommand);
+						mQueuePtr.Enqueue(file[i].CloneForPass(CurrentPassSettings));
 					}
 				}
 			}
@@ -2968,6 +3088,7 @@ namespace LaserGRBL
 				mSentPtr.Add(new GrblMessage(string.Format("[{0} lines, {1} errors, {2}]", file.Count, mTP.ErrorCount, Tools.Utils.TimeSpanToString(ProgramTime, Tools.Utils.TimePrecision.Second, Tools.Utils.TimePrecision.Second, ",", true)), GrblMessage.MessageType.Diagnostic));
 				OnProgramEnded?.Invoke();
 				LoopCount--;
+				if (mJobPassPlan != null) mPassIndex++;
 				RunProgramFromStart(false, false, true);
 			}
 			else
@@ -2976,6 +3097,7 @@ namespace LaserGRBL
 				mSentPtr.Add(new GrblMessage(string.Format("[{0} lines, {1} errors, {2}]", file.Count, mTP.ErrorCount, Tools.Utils.TimeSpanToString(ProgramTime, Tools.Utils.TimePrecision.Second, Tools.Utils.TimePrecision.Second, ",", true)), GrblMessage.MessageType.Diagnostic));
                 OnProgramEnded?.Invoke();
                 OnJobEnd();
+				mPassSequenceStarted = false;
 
 				SoundEvent.PlaySound(SoundEvent.EventId.Success);
 
@@ -3011,17 +3133,21 @@ namespace LaserGRBL
 			get
 			{
 				string lastFile = Settings.GetObject<string>("Core.LastOpenFile", null);
-				return CanLoadNewFile && lastFile != null && System.IO.File.Exists(lastFile);
+				return CanOpenJobFile && lastFile != null && System.IO.File.Exists(lastFile);
 			}
 		}
 
 		public bool QueueEmpty { get { return mQueue.Count == 0; } }
 
 		public bool CanLoadNewFile
-		{ get { return !InProgram && !file.CheckInUse(false); } }
+		{ get { return !InProgram && !mRebuildingRaster && !file.CheckInUse(false); } }
+
+		internal bool CanOpenJobFile => CanLoadNewFile && !JobEditorOpen;
+
+		internal bool JobEditorOpen { get; set; }
 
 		public bool CanSendFile
-		{ get { return IsConnected && HasProgram && IdleOrCheck && QueueEmpty && !mDoingSend; } }
+		{ get { return IsConnected && HasProgram && IdleOrCheck && QueueEmpty && !mDoingSend && !mRebuildingRaster && !JobEditorOpen; } }
 
 		public bool CanAbortProgram
 		{ get { return IsConnected && HasProgram && (MachineStatus == MacStatus.Run || IsAnyHoldState(MachineStatus)) || !QueueEmpty; } }
@@ -3055,6 +3181,123 @@ namespace LaserGRBL
 
 		public decimal LoopCount
 		{ get { return mLoopCount; } set { mLoopCount = value; if (OnLoopCountChange != null) OnLoopCountChange(mLoopCount); } }
+
+		public JobPassPlan Passes { get { return mJobPassPlan; } }
+		public JobPass CurrentPassSettings { get { return mJobPassPlan == null ? null : mJobPassPlan[mPassIndex]; } }
+		public int CurrentPassNumber { get { return mPassIndex + 1; } }
+		public bool CanConfigurePasses { get { return HasProgram && CanLoadNewFile && QueueEmpty && !mDoingSend; } }
+		internal bool HasJobOperations
+		{
+			get { return file.Operations.Count > 0 && file.RasterSource == null; }
+		}
+
+		internal void RebuildOperations(IList<JobOperation> operations, Action<Exception> completed)
+		{
+			if (!CanConfigurePasses || !HasJobOperations)
+				throw new InvalidOperationException("Stop the job before editing operations.");
+
+			var worker = new System.ComponentModel.BackgroundWorker();
+			worker.DoWork += (sender, args) => args.Result = file.BuildOperations(operations);
+			worker.RunWorkerCompleted += (sender, args) =>
+			{
+				var error = args.Error;
+				try
+				{
+					if (error == null) file.ApplyOperations((GrblFile)args.Result);
+				}
+				catch (Exception ex) { error = ex; }
+				finally
+				{
+					mRebuildingRaster = false;
+					worker.Dispose();
+				}
+				completed(error);
+			};
+			mRebuildingRaster = true;
+			try { worker.RunWorkerAsync(); }
+			catch
+			{
+				mRebuildingRaster = false;
+				worker.Dispose();
+				throw;
+			}
+		}
+
+		internal void RebuildRasterPasses(RasterConverter.ImageProcessor source, JobPassPlan plan, Action<Exception> completed)
+		{
+			var draft = source.CopyRasterSource();
+			draft.RasterPasses = plan;
+			ApplyRasterEdit(source, draft, GrblFile.RasterEdit.Apply, completed);
+		}
+
+		internal void ApplyRasterEdit(RasterConverter.ImageProcessor expected, RasterConverter.ImageProcessor draft, GrblFile.RasterEdit edit, Action<Exception> completed)
+		{
+			bool ownsDraft = edit == GrblFile.RasterEdit.Apply;
+			if (!CanConfigurePasses || expected == null || expected != file.RasterSource || draft == null)
+			{
+				if (ownsDraft) draft?.Dispose();
+				completed(new InvalidOperationException("The loaded job changed or is busy."));
+				return;
+			}
+
+			var worker = new System.ComponentModel.BackgroundWorker();
+			worker.DoWork += (sender, args) => args.Result = draft.BuildRasterJob(draft.RasterPasses);
+			worker.RunWorkerCompleted += (sender, args) =>
+			{
+				Exception error = args.Error;
+				try
+				{
+					if (error == null)
+					{
+						file.ApplyRasterEdit((GrblFile)args.Result, draft, edit);
+						LoopCount = 1;
+					}
+				}
+				catch (Exception ex) { error = ex; }
+				finally
+				{
+					mRebuildingRaster = false;
+					if (ownsDraft && file.RasterSource != draft) draft.Dispose();
+					worker.Dispose();
+				}
+				completed(error);
+			};
+			mRebuildingRaster = true;
+			try { worker.RunWorkerAsync(); }
+			catch (Exception ex)
+			{
+				mRebuildingRaster = false;
+				if (ownsDraft) draft.Dispose();
+				worker.Dispose();
+				completed(ex);
+			}
+		}
+
+		public void ConfigurePasses(JobPassPlan plan)
+		{
+			lock (this)
+			{
+				if (!CanConfigurePasses) throw new InvalidOperationException("Wait until the job has stopped before editing passes.");
+				mJobPassPlan = plan;
+				mPassIndex = 0;
+				mPassSequenceStarted = false;
+				mTP.Reset(true); // Changing the sequence starts a new job, rather than resuming an old pass.
+				LoopCount = plan == null ? 1 : plan.Count;
+			}
+		}
+
+		private void BeginPasses()
+		{
+			mPassIndex = 0;
+			mPassSequenceStarted = mJobPassPlan != null;
+			if (mJobPassPlan != null) LoopCount = mJobPassPlan.Count;
+		}
+
+		private void LogPass()
+		{
+			if (mJobPassPlan != null)
+				mSentPtr.Add(new GrblMessage(string.Format("[Pass {0}/{1}: {2}]", CurrentPassNumber, mJobPassPlan.Count, CurrentPassSettings), GrblMessage.MessageType.Diagnostic));
+		}
 
 		private ThreadingMode CurrentThreadingMode
 		{ get { return Settings.GetObject("Threading Mode", ThreadingMode.UltraFast); } }
@@ -3171,7 +3414,7 @@ namespace LaserGRBL
 
 		internal bool ManageHotKeys(Form parent, System.Windows.Forms.Keys keys)
 		{
-			if (SuspendHK)
+			if (SuspendHK || JobEditorOpen)
 				return false;
 			else
 				return mHotKeyManager.ManageHotKeys(parent, keys);
@@ -3241,7 +3484,7 @@ namespace LaserGRBL
 		//}
 
 		static System.Text.RegularExpressions.Regex bracketsRegEx = new System.Text.RegularExpressions.Regex(@"\[(?:[^]]+)\]");
-		internal void ExecuteCustomCode(string buttoncode)
+		internal void ExecuteCustomCode(string buttoncode, JobPass pass = null)
 		{
 			buttoncode = buttoncode.Trim();
 			string[] arr = buttoncode.Split(new string[] { Environment.NewLine }, StringSplitOptions.None);
@@ -3258,7 +3501,7 @@ namespace LaserGRBL
 						SendImmediate(b);
 					}
 					else
-					{ EnqueueCommand(new GrblCommand(tosend, 0, true)); }
+					{ EnqueueCommand(new GrblCommand(tosend, 0, true).CloneForPass(pass)); }
 				}
 			}
 		}

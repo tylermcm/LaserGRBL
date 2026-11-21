@@ -48,24 +48,36 @@ namespace LaserGRBL.SvgConverter
 			}
 		}
 
-		internal static void CreateAndShowDialog(GrblCore core, string filename, bool append)
-        {
-            using (SvgToGCodeForm f = new SvgToGCodeForm(core, filename, append))
-            {
-                f.ShowDialogForm();
-                if (f.DialogResult == DialogResult.OK)
-                {
-                    Settings.SetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", f.IIBorderTracing.CurrentValue);
-                    Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMax", f.IIMaxPower.CurrentValue);
-					Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMin", f.IIMinPower.CurrentValue);
-					Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.LaserOn", (f.CBLaserON.SelectedItem as ComboboxItem).Value);
+		internal static void OpenImport(GrblCore core, string filename, bool append, PreviewForm preview)
+		{
+			var form = new SvgToGCodeForm(core, filename, append);
+			form.Prepare();
+			if (preview != null)
+			{
+				form.BtnCancel.Click += (sender, args) => preview.PopJobView();
+				form.BtnCreate.Click += (sender, args) =>
+				{
+					var filter = form.StoreImportSettings();
+					core.LoadedFile.LoadImportedSVG(filename, append, core, filter);
+					preview.PopJobView();
+				};
+				preview.ShowJobEditor(form, form.Text);
+				return;
+			}
 
-					var selectedFilter = (ColorFilter)Enum.Parse(typeof(ColorFilter),(f.CBFilter.SelectedItem as ComboboxItem).Value.ToString());
-					
-					core.LoadedFile.LoadImportedSVG(filename, append, core, selectedFilter);
-                }
-            }
-        }
+			using (form)
+				if (form.ShowDialog(FormsHelper.MainForm) == DialogResult.OK)
+					core.LoadedFile.LoadImportedSVG(filename, append, core, form.StoreImportSettings());
+		}
+
+		private ColorFilter StoreImportSettings()
+		{
+			Settings.SetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", IIBorderTracing.CurrentValue);
+			Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMax", IIMaxPower.CurrentValue);
+			Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMin", IIMinPower.CurrentValue);
+			Settings.SetObject("GrayScaleConversion.Gcode.LaserOptions.LaserOn", (CBLaserON.SelectedItem as ComboboxItem).Value);
+			return (ColorFilter)(CBFilter.SelectedItem as ComboboxItem).Value;
+		}
 
         private SvgToGCodeForm(GrblCore core, string filename, bool append)
 		{
@@ -101,7 +113,7 @@ namespace LaserGRBL.SvgConverter
 			IIMaxPower.MaxValue = (int)GrblCore.Configuration.MaxPWM;
 		}
 
-		public void ShowDialogForm()
+		private void Prepare()
         {
 			IIBorderTracing.CurrentValue = Settings.GetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", 1000);
 
@@ -123,7 +135,6 @@ namespace LaserGRBL.SvgConverter
 
 			RefreshPerc();
 
-			ShowDialog(FormsHelper.MainForm);
 		}
 
 

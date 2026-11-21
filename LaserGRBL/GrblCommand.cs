@@ -266,6 +266,30 @@ namespace LaserGRBL
 		public object Clone()
 		{ return MemberwiseClone(); }
 
+		private static readonly System.Text.RegularExpressions.Regex PassWords =
+			new System.Text.RegularExpressions.Regex(@"\([^)]*\)|;[^\r\n]*|(?<word>[sSfF])\s*(?<value>[+-]?(?:\d+(?:\.\d*)?|\.\d+))", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+		/// <summary>Scale programmed power and feed without changing the source, timing, or preview result link.</summary>
+		public GrblCommand CloneForPass(JobPass pass)
+		{
+			GrblCommand copy = (GrblCommand)Clone();
+			if (pass == null || (pass.PowerPercent == 100 && pass.SpeedPercent == 100) || IsGrblCommand)
+				return copy;
+
+			copy.mLine = PassWords.Replace(mLine, match =>
+			{
+				var word = match.Groups["word"];
+				if (!word.Success) return match.Value; // Comments are matched and preserved intact.
+				bool isPower = word.Value.Equals("S", StringComparison.OrdinalIgnoreCase);
+				decimal percent = isPower ? pass.PowerPercent : pass.SpeedPercent;
+				if (percent == 100) return match.Value;
+				decimal value = decimal.Parse(match.Groups["value"].Value, System.Globalization.CultureInfo.InvariantCulture);
+				return word.Value + (value * (percent / 100m)).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+			});
+			copy.mHelper = null; // A source command may already have unscaled parsed S/F words.
+			return copy;
+		}
+
 		public string Command
 		{ get { return mLine; } }
 

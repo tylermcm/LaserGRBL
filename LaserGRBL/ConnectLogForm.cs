@@ -21,17 +21,222 @@ namespace LaserGRBL
 		public ComWrapper.WrapperType currentWrapper;
 
 		GrblCore Core;
+		private PreviewForm jobPreview;
 		private string mLoadedFileName;
+		private Button BtnJobPasses;
+		private Button BtnEditRaster;
+		private Button BtnUndoRaster;
+		private Button BtnRedoRaster;
+		private Button BtnPlayback;
+		private Button BtnPlaceRaster;
+		private Button BtnCamera;
+		private Label LblPassSummary;
 
 		public ConnectLogForm()
 		{
 			currentWrapper = Settings.GetObject("ComWrapper Protocol", ComWrapper.WrapperType.UsbSerial);
 			InitializeComponent();
+			InitializePassControls();
         }
 
-        public void SetCore(GrblCore core)
+		private void InitializePassControls()
+		{
+			BtnJobPasses = CreateJobButton("Job passes");
+			LblPassSummary = new Label { Text = "Same settings each pass", AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+			var panel = new TableLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+			panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+			panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+			panel.Controls.Add(BtnJobPasses, 0, 0);
+			panel.Controls.Add(LblPassSummary, 1, 0);
+			tableLayoutPanel5.RowCount = 4;
+			tableLayoutPanel5.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			tableLayoutPanel5.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			tableLayoutPanel5.Controls.Add(panel, 0, 2);
+			tableLayoutPanel5.SetColumnSpan(panel, tableLayoutPanel5.ColumnCount);
+			var edits = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, Margin = Padding.Empty };
+			BtnEditRaster = CreateJobButton("Edit image");
+			BtnUndoRaster = CreateJobButton("Undo");
+			BtnRedoRaster = CreateJobButton("Redo");
+			BtnPlayback = CreateJobButton("Playback");
+			BtnPlaceRaster = CreateJobButton("Place");
+			BtnCamera = CreateJobButton("Camera", true);
+			edits.Controls.AddRange(new Control[] { BtnEditRaster, BtnUndoRaster, BtnRedoRaster, BtnPlaceRaster, BtnPlayback, BtnCamera });
+			BtnPlaceRaster.Click += (sender, args) => PlaceRaster();
+			BtnCamera.Click += (sender, args) =>
+			{
+				if (jobPreview.JobEditor is CameraView) CloseJobEditor();
+				else if (jobPreview.JobEditor == null)
+				{
+					jobPreview.ShowJobEditor(new CameraView(), "Live camera", showBack: true, blocksRun: false);
+					TimerUpdate();
+				}
+			};
+			tableLayoutPanel5.Controls.Add(edits, 0, 3);
+			tableLayoutPanel5.SetColumnSpan(edits, tableLayoutPanel5.ColumnCount);
+			tableLayoutPanel5.Layout += (sender, args) => FitJobControls();
+			FitJobControls();
+			BtnEditRaster.Click += (sender, args) => RasterConverter.RasterToLaserForm.EditLoadedJob(jobPreview, Core);
+			BtnUndoRaster.Click += (sender, args) => NavigateRasterHistory(GrblFile.RasterEdit.Undo);
+			BtnRedoRaster.Click += (sender, args) => NavigateRasterHistory(GrblFile.RasterEdit.Redo);
+			BtnPlayback.Click += (sender, args) =>
+			{
+				if (!Core.CanConfigurePasses || jobPreview.JobEditor is JobPlaybackView) return;
+				jobPreview.ShowJobEditor(new JobPlaybackView(Core.LoadedFile), "Job playback", showBack: true);
+				TimerUpdate();
+			};
+			BtnJobPasses.Click += (sender, args) => OpenJobEditor();
+		}
+
+		private void OpenJobEditor()
+		{
+			if (!Core.CanConfigurePasses || Core.JobEditorOpen) return;
+			if (Core.HasJobOperations)
+			{
+				var operations = new JobOperationsEditor(Core, jobPreview);
+				operations.CloseRequested += (sender, args) => CloseJobEditor();
+				operations.StatusChanged += jobPreview.SetJobEditorStatus;
+				jobPreview.ShowJobEditor(operations, "Job operations");
+			}
+			else
+			{
+				var source = Core.LoadedFile.RasterSource;
+				decimal maxResolution = Settings.GetObject("Raster Hi-Res", false) ? 50 : 20;
+				var editor = new JobPassEditor(source == null ? Core.Passes : source.RasterPasses,
+					(int)Core.LoopCount, rasterDefaults: source?.DefaultRasterPass, maxResolution: maxResolution,
+					supportsPower: source == null || source.RasterSupportsPower);
+				editor.CancelRequested += (sender, args) => CloseJobEditor();
+				editor.ApplyRequested += (sender, args) => ApplyJobPasses(editor, source);
+				jobPreview.ShowJobEditor(editor, "Job passes");
+			}
+			TimerUpdate();
+		}
+
+		private void CloseJobEditor()
+		{
+			jobPreview.CloseJobEditor();
+			TimerUpdate();
+		}
+
+		private void ApplyJobPasses(JobPassEditor editor, RasterConverter.ImageProcessor source)
+		{
+			if (!Core.CanConfigurePasses || source != Core.LoadedFile.RasterSource)
+			{
+				jobPreview.SetJobEditorStatus("Wait until the loaded job is ready before applying changes.");
+				return;
+			}
+
+			try
+			{
+				if (source == null)
+				{
+					Core.ConfigurePasses(editor.Plan);
+					CloseJobEditor();
+					return;
+				}
+				editor.Enabled = false;
+				jobPreview.SetJobEditorStatus("Building passes...");
+				Core.RebuildRasterPasses(source, editor.Plan, error =>
+				{
+					if (IsDisposed || editor.IsDisposed) return;
+					if (error == null) CloseJobEditor();
+					else
+					{
+						editor.Enabled = true;
+						jobPreview.SetJobEditorStatus(error.Message);
+						TimerUpdate();
+					}
+				});
+			}
+			catch (Exception ex)
+			{
+				editor.Enabled = true;
+				jobPreview.SetJobEditorStatus(ex.Message);
+			}
+		}
+
+		private void FitJobControls()
+		{
+			int width = tableLayoutPanel5.ClientSize.Width;
+			if (width <= 0) return;
+			int height = tableLayoutPanel5.GetPreferredSize(new Size(width, 0)).Height;
+			if (GBFile.MinimumSize.Height != height)
+				GBFile.MinimumSize = new Size(0, height);
+		}
+
+		private static GrblButton CreateJobButton(string caption, bool enabled = false)
+		{
+			return new GrblButton
+			{
+				Text = caption, Enabled = enabled, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+				Margin = new Padding(1), Padding = new Padding(4, 0, 4, 0), MinimumSize = new Size(0, 23)
+			};
+		}
+
+		private void PlaceRaster()
+		{
+			var file = Core.LoadedFile;
+			var source = file.RasterSource;
+			if (!Core.CanConfigurePasses || source == null || file.Operations.Count != 1) return;
+			try
+			{
+				var view = new JobPlacementView(file, file.Operations[0], null, false);
+				view.CancelRequested += (sender, args) => CloseJobEditor();
+				view.ApplyRequested += (sender, args) =>
+				{
+					var placement = view.Placement;
+					var draft = source.CopyRasterSource();
+					draft.TargetOffset = placement.Map(source.TargetOffset);
+					draft.TargetSize = new SizeF((float)(source.TargetSize.Width * placement.Scale), (float)(source.TargetSize.Height * placement.Scale));
+					if (draft.RasterSettings != null)
+					{
+						draft.RasterSettings = new System.Collections.Generic.Dictionary<string, object>(draft.RasterSettings);
+						draft.RasterSettings["GrayScaleConversion.Gcode.ImageSize.W"] = draft.TargetSize.Width;
+						draft.RasterSettings["GrayScaleConversion.Gcode.ImageSize.H"] = draft.TargetSize.Height;
+						draft.RasterSettings["GrayScaleConversion.Gcode.Offset.X"] = draft.TargetOffset.X;
+						draft.RasterSettings["GrayScaleConversion.Gcode.Offset.Y"] = draft.TargetOffset.Y;
+					}
+					view.Enabled = false;
+					jobPreview.SetJobEditorStatus("Rebuilding job...");
+					Core.ApplyRasterEdit(source, draft, GrblFile.RasterEdit.Apply, error =>
+					{
+						if (view.IsDisposed) return;
+						if (error == null) CloseJobEditor();
+						else
+						{
+							view.Enabled = true;
+							jobPreview.SetJobEditorStatus(error.Message);
+						}
+					});
+				};
+				jobPreview.ShowJobEditor(view, view.Text);
+				TimerUpdate();
+			}
+			catch (Exception ex) { OnRasterEditCompleted(ex); }
+		}
+
+		private void NavigateRasterHistory(GrblFile.RasterEdit edit)
+		{
+			if (!Core.CanConfigurePasses) return;
+			var file = Core.LoadedFile;
+			var target = file.GetRasterHistory(edit);
+			if (target == null) return;
+			BtnJobPasses.Text = "Rebuilding job...";
+			Core.ApplyRasterEdit(file.RasterSource, target, edit, OnRasterEditCompleted);
+			TimerUpdate();
+		}
+
+		private void OnRasterEditCompleted(Exception error)
+		{
+			if (IsDisposed) return;
+			BtnJobPasses.Text = "Job passes...";
+			if (error != null) MessageBox.Show(ParentForm, error.Message, "Edit raster job", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+			TimerUpdate();
+		}
+
+		public void SetCore(GrblCore core, PreviewForm preview)
 		{
 			Core = core;
+			jobPreview = preview;
 			Core.OnFileLoaded += OnFileLoaded;
 			Core.OnLoopCountChange += OnLoopCountChanged;
 			CmdLog.SetCom(core);
@@ -83,6 +288,7 @@ namespace LaserGRBL
 			}
 			else
 			{
+				jobPreview.CloseJobEditorOnFileLoad();
 				mLoadedFileName = filename;
 				TbFileName.Text = System.IO.Path.GetFileName(filename);
 			}
@@ -251,7 +457,40 @@ namespace LaserGRBL
 			BtnRunProgram.Enabled = Core.CanSendFile;
             BtnRunProgram.Visible = !Core.CanAbortProgram;
             BtnAbortProgram.Visible = Core.CanAbortProgram;
-            BtnOpen.Enabled = Core.CanLoadNewFile;
+			BtnOpen.Enabled = Core.CanOpenJobFile;
+			bool canOpenEditor = Core.CanConfigurePasses && !Core.JobEditorOpen;
+			BtnJobPasses.Enabled = canOpenEditor;
+			BtnEditRaster.Enabled = canOpenEditor && Core.LoadedFile.RasterSource != null;
+			BtnPlaceRaster.Enabled = BtnEditRaster.Enabled && Core.LoadedFile.Operations.Count == 1;
+			BtnUndoRaster.Enabled = BtnEditRaster.Enabled && Core.LoadedFile.CanUndoRasterEdit;
+			BtnRedoRaster.Enabled = BtnEditRaster.Enabled && Core.LoadedFile.CanRedoRasterEdit;
+			BtnPlayback.Enabled = canOpenEditor;
+			BtnCamera.Enabled = !Core.JobEditorOpen;
+			var rasterPasses = Core.LoadedFile.RasterSource?.RasterPasses;
+			UDLoopCounter.Enabled = !Core.JobEditorOpen && Core.Passes == null && rasterPasses == null && !Core.HasJobOperations;
+			string powerSummary = "Same settings each pass";
+			if (Core.HasJobOperations)
+			{
+				BtnJobPasses.Text = "Operations";
+				powerSummary = string.Format("{0} operations in this job", Core.LoadedFile.Operations.Count);
+			}
+			else if (Core.CanConfigurePasses)
+				BtnJobPasses.Text = "Job passes";
+			if (rasterPasses != null)
+				powerSummary = string.Format("{0} raster passes in this job", rasterPasses.Count);
+			if (Core.Passes != null)
+			{
+				var values = new System.Collections.Generic.List<string>();
+				for (int i = 0; i < Core.Passes.Count; i++) values.Add((i + 1) + ": " + Core.Passes[i]);
+				powerSummary = Core.InProgram
+					? string.Format("Pass {0}/{1}: {2}", Core.CurrentPassNumber, Core.Passes.Count, Core.CurrentPassSettings)
+					: string.Join("; ", values.ToArray());
+			}
+			if (LblPassSummary.Text != powerSummary)
+			{
+				LblPassSummary.Text = powerSummary;
+				TT.SetToolTip(LblPassSummary, powerSummary + " (of imported settings)");
+			}
 
 			bool old = TxtManualCommand.Enabled;
 			TxtManualCommand.Enabled = Core.CanSendManualCommand;
@@ -339,6 +578,7 @@ namespace LaserGRBL
 
 		internal void OnColorChange()
 		{
+			tableLayoutPanel5.Invalidate(true);
 			TbFileName.BackColor = ColorScheme.LogBackColor;
             TbFileName.ForeColor = ColorScheme.FormForeColor;
 

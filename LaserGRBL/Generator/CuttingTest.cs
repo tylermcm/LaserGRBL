@@ -97,6 +97,7 @@ namespace LaserGRBL.Generator
 		private void BtnCreate_Click(object sender, EventArgs e)
 		{
 			ComboboxItem mode = CBLaserON.SelectedItem as ComboboxItem;
+			MaterialTestRecord.Last = MaterialTestRecord.ForCutting(Ii_Fsteps.CurrentValue, Ii_Fmin.CurrentValue, Ii_Fmax.CurrentValue, Ii_Pmin.CurrentValue, Ii_Pmax.CurrentValue, Ii_Sfixed.CurrentValue, PhTbLabel.Text, mode.Value as string);
 			mCore.LoadedFile.GenerateCuttingTest(Ii_Fsteps.CurrentValue, Ii_Fmin.CurrentValue, Ii_Fmax.CurrentValue, Ii_Pmin.CurrentValue, Ii_Pmax.CurrentValue, Ii_Sfixed.CurrentValue, Ii_Ftext.CurrentValue, Ii_Stext.CurrentValue, PhTbLabel.Text, mode.Value as string);
 			Close();
 		}

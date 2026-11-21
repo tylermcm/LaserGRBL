@@ -57,6 +57,8 @@ namespace LaserGRBL.SvgConverter
 		private float gcodeReduceVal = 0.1f;     // limit when to remove G1 commands
 
 		public System.Drawing.PointF UserOffset = new System.Drawing.PointF(0,0);
+		internal bool RecordContours { get; set; }
+		internal const string ContourMarker = ";@LASERGRBL_CONTOUR";
 		public float GCodeXYFeed = 2000;        // XY feed to apply for G1
         private double scaledError = 1.0;
 
@@ -112,13 +114,20 @@ namespace LaserGRBL.SvgConverter
 		private string convertSVG(XElement svgCode, GrblCore core)
 		{
 			gcode.setup(core);          // initialize GCode creation (get stored settings for export)
+			bool originalCompression = gcode.reduceGCode;
+			if (RecordContours) gcode.reduceGCode = false;
 			gcode.setRapidNum(Settings.GetObject("Disable G0 fast skip", false) ? 1 : 0);
 
-			gcode.PutInitialCommand(gcodeString);
-			startConvert(svgCode);
-			gcode.PutFinalCommand(gcodeString);
-
-			return gcodeString.Replace(',', '.').ToString();
+			try
+			{
+				gcode.PutInitialCommand(gcodeString);
+				if (RecordContours && Settings.GetObject("Disable G0 fast skip", false))
+					gcodeString.AppendFormat(System.Globalization.CultureInfo.InvariantCulture, "F{0}\r\n", GCodeXYFeed);
+				startConvert(svgCode);
+				gcode.PutFinalCommand(gcodeString);
+				return gcodeString.Replace(',', '.').ToString();
+			}
+			finally { if (RecordContours) gcode.reduceGCode = originalCompression; }
 		}
 
 		/// <summary>
@@ -1254,6 +1263,7 @@ namespace LaserGRBL.SvgConverter
 		/// </summary>
 		private void gcodeStartPath(float x, float y, string cmt)
 		{
+			if (RecordContours) gcodeString.AppendLine(ContourMarker);
 			Point coord = translateXY(x, y);
 			lastGCX = coord.X; lastGCY = coord.Y;
 			lastSetGCX = coord.X; lastSetGCY = coord.Y;

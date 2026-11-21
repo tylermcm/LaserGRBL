@@ -25,11 +25,17 @@ namespace LaserGRBL.RasterConverter
 		ImageProcessor IP;
 		bool preventClose;
 		bool supportPWM = Settings.GetObject("Support Hardware PWM", true);
+		private readonly ImageProcessor editSource;
+		private PreviewForm host;
+		private Action importFinished;
+		internal bool IsGenerating { get; private set; }
 
-		private RasterToLaserForm(GrblCore core, string filename, bool append)
+		private RasterToLaserForm(GrblCore core, string filename, bool append, ImageProcessor source = null)
 		{
 			InitializeComponent();
 			mCore = core;
+			editSource = source;
+			if (source != null) supportPWM = source.RasterSupportsPower;
 
 			UDQuality.Maximum = UDFillingQuality.Maximum = GetMaxQuality();
 
@@ -56,7 +62,12 @@ namespace LaserGRBL.RasterConverter
             IconsMgr.PrepareButton(BtnReverse, "mdi-invert-colors", icoToolSize);
             IconsMgr.PrepareButton(BtnOutliner, "mdi-auto-fix", icoToolSize);
 
-            IP = new ImageProcessor(core, filename, GetImageSize(), append);
+			IP = source == null ? new ImageProcessor(core, filename, GetImageSize(), append) : source.CopyRasterSource();
+			if (source != null)
+			{
+				Text = "Edit raster job";
+				IP.FormResize(GetImageSize());
+			}
 			//PbOriginal.Image = IP.Original;
 			ImageProcessor.PreviewReady += OnPreviewReady;
 			ImageProcessor.PreviewBegin += OnPreviewBegin;
@@ -101,9 +112,19 @@ namespace LaserGRBL.RasterConverter
 			CbFillingDirection.ResumeLayout();
 
 			RbLineToLineTracing.Visible = supportPWM;
+			if (source != null)
+				RbVectorize.Visible = RbCenterline.Visible = false;
 
 			LoadSettings();
 			RefreshVE();
+		}
+
+		internal static void EditLoadedJob(PreviewForm preview, GrblCore core)
+		{
+			var source = core.LoadedFile.RasterSource;
+			if (source == null || !core.CanConfigurePasses || core.JobEditorOpen) return;
+			var editor = new RasterToLaserForm(core, source.SourceFileName, false, source) { host = preview };
+			preview.ShowJobEditor(editor, editor.Text, closeOnLoad: false);
 		}
 
 		private decimal GetMaxQuality()
@@ -179,13 +200,21 @@ namespace LaserGRBL.RasterConverter
 			WB.Running = true;
 		}
 
-		internal static void CreateAndShowDialog(GrblCore core, string filename, bool append)
+		internal static void OpenImport(GrblCore core, string filename, bool append, PreviewForm preview, Action completed = null)
 		{
+			if (preview != null)
+			{
+				var editor = new RasterToLaserForm(core, filename, append) { host = preview, importFinished = completed };
+				preview.ShowJobEditor(editor, editor.Text, closeOnLoad: false);
+				return;
+			}
+
 			using (RasterToLaserForm f = new RasterToLaserForm(core, filename, append))
 			{
 				f.Icon = FormsHelper.MainForm.Icon;
                 f.ShowDialog(FormsHelper.MainForm);
-            }	
+            }
+			completed?.Invoke();
 		}
 
 		void GoodInput(object sender, KeyPressEventArgs e)
@@ -200,29 +229,64 @@ namespace LaserGRBL.RasterConverter
 			&& System.Windows.Forms.MessageBox.Show(this, $"Using { GrblCore.TranslateEnum(IP.FillingDirection)} with quality > 2 line/mm could be very time consuming with big image. Continue?", "Warning",  MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.OK)
 				return;				
 			
-			using (ConvertSizeAndOptionForm f = new ConvertSizeAndOptionForm(mCore))
+			if (host != null)
 			{
-				f.ShowDialog(this, IP);
-				if (f.DialogResult == DialogResult.OK)
+				new ConvertSizeAndOptionForm(mCore).ShowInPreview(host, IP, editSource != null, GenerateJob);
+				return;
+			}
+
+			using (var options = new ConvertSizeAndOptionForm(mCore))
+			{
+				options.ShowDialog(this, IP, editSource != null);
+				if (options.DialogResult == DialogResult.OK) GenerateJob();
+			}
+		}
+
+		private void GenerateJob()
+		{
+			IP.RasterSettings = GetActualSettings();
+			var editedJob = editSource == null ? null : IP.CopyRasterSource();
+			IsGenerating = true;
+			preventClose = true;
+			Cursor = Cursors.WaitCursor;
+			SuspendLayout();
+			TCOriginalPreview.SelectedIndex = 0;
+			FlipControl.Enabled = false;
+			BtnCreate.Enabled = false;
+			WB.Visible = true;
+			WB.Running = true;
+			if (host == null) FormBorderStyle = FormBorderStyle.FixedSingle;
+			TlpLeft.Enabled = false;
+			MaximizeBox = false;
+			ResumeLayout();
+
+			if (editSource != null)
+			{
+				mCore.ApplyRasterEdit(editSource, editedJob, GrblFile.RasterEdit.Apply, error =>
 				{
-					preventClose = true;
-					Cursor = Cursors.WaitCursor;
-					SuspendLayout();
-					TCOriginalPreview.SelectedIndex = 0;
-					FlipControl.Enabled = false;
-					BtnCreate.Enabled = false;
-					WB.Visible = true;
-					WB.Running = true;
-					FormBorderStyle = FormBorderStyle.FixedSingle;
-					TlpLeft.Enabled = false;
-					MaximizeBox = false;
-					ResumeLayout();
+					if (IsDisposed) return;
+					IsGenerating = false;
+					preventClose = false;
+					if (error == null) { FinishEditing(); return; }
 
-					StoreSettings();
-					Project.AddSettings(GetActualSettings()); // Store project settings
+					Cursor = Cursors.Default;
+					WB.Running = WB.Visible = false;
+					FlipControl.Enabled = BtnCreate.Enabled = TlpLeft.Enabled = true;
+					host.SetJobEditorStatus(error.Message);
+				});
+				return;
+			}
+			StoreSettings();
+			IP.GenerateGCode();
+		}
 
-					IP.GenerateGCode(); //processo asincrono che ritorna con l'evento "OnGenerationComplete"
-				}
+		private void FinishEditing()
+		{
+			if (host == null) Close();
+			else
+			{
+				host.PopJobView();
+				importFinished?.Invoke();
 			}
 		}
 
@@ -238,6 +302,14 @@ namespace LaserGRBL.RasterConverter
 				{
 					if (IP != null)
 					{
+						if (ex == null)
+						{
+							var projectSettings = GetActualSettings();
+							if (IP.RasterPasses != null &&
+								(IP.SelectedTool == ImageProcessor.Tool.Line2Line || IP.SelectedTool == ImageProcessor.Tool.Dithering))
+								projectSettings.Add(GrblCore.ProjectRasterPassesKey, IP.RasterPasses);
+							Project.AddSettings(projectSettings);
+						}
 						if (IP.SelectedTool == ImageProcessor.Tool.Dithering)
 							mCore.UsageCounters.Dithering++;
 						else if (IP.SelectedTool == ImageProcessor.Tool.Line2Line)
@@ -262,66 +334,78 @@ namespace LaserGRBL.RasterConverter
 						P?.Dispose();
 					}
 				}
-				finally { Close(); }
+				finally
+				{
+					IsGenerating = false;
+					FinishEditing();
+				}
 			}
 		}
 
 		private void StoreSettings()
 		{
-            foreach (var setting in GetActualSettings())
+            foreach (var setting in IP.RasterSettings)
 				Settings.SetObject(setting.Key, setting.Value);
 		}
 
 		private void LoadSettings()
 		{
-			if ((IP.SelectedTool = Settings.GetObject("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Line2Line)
+			if ((IP.SelectedTool = GetRasterSetting("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Line2Line)
 				RbLineToLineTracing.Checked = true;
-			else if ((IP.SelectedTool = Settings.GetObject("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Dithering)
+			else if ((IP.SelectedTool = GetRasterSetting("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Dithering)
 				RbDithering.Checked = true;
-			else if ((IP.SelectedTool = Settings.GetObject("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Centerline)
+			else if ((IP.SelectedTool = GetRasterSetting("GrayScaleConversion.RasterConversionTool", ImageProcessor.Tool.Line2Line)) == ImageProcessor.Tool.Centerline)
 				RbCenterline.Checked = true;
 			else
 				RbVectorize.Checked = true;
 
-			CbDirections.SelectedItem = IP.LineDirection = Settings.GetObject("GrayScaleConversion.Line2LineOptions.Direction", ImageProcessor.Direction.Horizontal);
-			UDQuality.Value = IP.Quality = Math.Min(UDQuality.Maximum, Settings.GetObject("GrayScaleConversion.Line2LineOptions.Quality", 3.0m));
-			CbLinePreview.Checked = IP.LinePreview = Settings.GetObject("GrayScaleConversion.Line2LineOptions.Preview", false);
+			CbDirections.SelectedItem = IP.LineDirection = GetRasterSetting("GrayScaleConversion.Line2LineOptions.Direction", ImageProcessor.Direction.Horizontal);
+			UDQuality.Value = IP.Quality = Math.Min(UDQuality.Maximum, GetRasterSetting("GrayScaleConversion.Line2LineOptions.Quality", 3.0m));
+			CbLinePreview.Checked = IP.LinePreview = GetRasterSetting("GrayScaleConversion.Line2LineOptions.Preview", false);
 
-			CbSpotRemoval.Checked = IP.UseSpotRemoval = Settings.GetObject("GrayScaleConversion.VectorizeOptions.SpotRemoval.Enabled", false);
-			UDSpotRemoval.Value = IP.SpotRemoval = Settings.GetObject("GrayScaleConversion.VectorizeOptions.SpotRemoval.Value", 2.0m);
-			CbSmoothing.Checked = IP.UseSmoothing = Settings.GetObject("GrayScaleConversion.VectorizeOptions.Smooting.Enabled", false);
-			UDSmoothing.Value = IP.Smoothing = Settings.GetObject("GrayScaleConversion.VectorizeOptions.Smooting.Value", 1.0m);
-			CbOptimize.Checked = IP.UseOptimize = Settings.GetObject("GrayScaleConversion.VectorizeOptions.Optimize.Enabled", false);
-			CbAdaptiveQuality.Checked = IP.UseAdaptiveQuality = Settings.GetObject("GrayScaleConversion.VectorizeOptions.UseAdaptiveQuality.Enabled", false);
-			UDOptimize.Value = IP.Optimize = Settings.GetObject("GrayScaleConversion.VectorizeOptions.Optimize.Value", 0.2m);
-			CbDownSample.Checked = IP.UseDownSampling = Settings.GetObject("GrayScaleConversion.VectorizeOptions.DownSample.Enabled", false);
-			UDDownSample.Value = IP.DownSampling = Settings.GetObject("GrayScaleConversion.VectorizeOptions.DownSample.Value", 2.0m);
-			CbOptimizeFast.Checked = IP.OptimizeFast = Settings.GetObject("GrayScaleConversion.VectorizeOptions.OptimizeFast.Enabled", false);
+			CbSpotRemoval.Checked = IP.UseSpotRemoval = GetRasterSetting("GrayScaleConversion.VectorizeOptions.SpotRemoval.Enabled", false);
+			UDSpotRemoval.Value = IP.SpotRemoval = GetRasterSetting("GrayScaleConversion.VectorizeOptions.SpotRemoval.Value", 2.0m);
+			CbSmoothing.Checked = IP.UseSmoothing = GetRasterSetting("GrayScaleConversion.VectorizeOptions.Smooting.Enabled", false);
+			UDSmoothing.Value = IP.Smoothing = GetRasterSetting("GrayScaleConversion.VectorizeOptions.Smooting.Value", 1.0m);
+			CbOptimize.Checked = IP.UseOptimize = GetRasterSetting("GrayScaleConversion.VectorizeOptions.Optimize.Enabled", false);
+			CbAdaptiveQuality.Checked = IP.UseAdaptiveQuality = GetRasterSetting("GrayScaleConversion.VectorizeOptions.UseAdaptiveQuality.Enabled", false);
+			UDOptimize.Value = IP.Optimize = GetRasterSetting("GrayScaleConversion.VectorizeOptions.Optimize.Value", 0.2m);
+			CbDownSample.Checked = IP.UseDownSampling = GetRasterSetting("GrayScaleConversion.VectorizeOptions.DownSample.Enabled", false);
+			UDDownSample.Value = IP.DownSampling = GetRasterSetting("GrayScaleConversion.VectorizeOptions.DownSample.Value", 2.0m);
+			CbOptimizeFast.Checked = IP.OptimizeFast = GetRasterSetting("GrayScaleConversion.VectorizeOptions.OptimizeFast.Enabled", false);
 
-			CbFillingDirection.SelectedItem = IP.FillingDirection = Settings.GetObject("GrayScaleConversion.VectorizeOptions.FillingDirection", ImageProcessor.Direction.None);
-			UDFillingQuality.Value = IP.FillingQuality = Math.Min(UDFillingQuality.Maximum, Settings.GetObject("GrayScaleConversion.VectorizeOptions.FillingQuality", 3.0m));
+			CbFillingDirection.SelectedItem = IP.FillingDirection = GetRasterSetting("GrayScaleConversion.VectorizeOptions.FillingDirection", ImageProcessor.Direction.None);
+			UDFillingQuality.Value = IP.FillingQuality = Math.Min(UDFillingQuality.Maximum, GetRasterSetting("GrayScaleConversion.VectorizeOptions.FillingQuality", 3.0m));
 
-			CbResize.SelectedItem = IP.Interpolation = Settings.GetObject("GrayScaleConversion.Parameters.Interpolation", InterpolationMode.HighQualityBicubic);
-			CbMode.SelectedItem = IP.Formula = Settings.GetObject("GrayScaleConversion.Parameters.Mode", ImageTransform.Formula.SimpleAverage);
-			TBRed.Value = IP.Red = Settings.GetObject("GrayScaleConversion.Parameters.R", 100);
-			TBGreen.Value = IP.Green = Settings.GetObject("GrayScaleConversion.Parameters.G", 100);
-			TBBlue.Value = IP.Blue = Settings.GetObject("GrayScaleConversion.Parameters.B", 100);
-			TbBright.Value = IP.Brightness = Settings.GetObject("GrayScaleConversion.Parameters.Brightness", 100);
-			TbContrast.Value = IP.Contrast = Settings.GetObject("GrayScaleConversion.Parameters.Contrast", 100);
-			CbThreshold.Checked = IP.UseThreshold = Settings.GetObject("GrayScaleConversion.Parameters.Threshold.Enabled", false);
-			TbThreshold.Value = IP.Threshold = Settings.GetObject("GrayScaleConversion.Parameters.Threshold.Value", 50);
-			TBWhiteClip.Value = IP.WhiteClip = Settings.GetObject("GrayScaleConversion.Parameters.WhiteClip", 5);
+			CbResize.SelectedItem = IP.Interpolation = GetRasterSetting("GrayScaleConversion.Parameters.Interpolation", InterpolationMode.HighQualityBicubic);
+			CbMode.SelectedItem = IP.Formula = GetRasterSetting("GrayScaleConversion.Parameters.Mode", ImageTransform.Formula.SimpleAverage);
+			TBRed.Value = IP.Red = GetRasterSetting("GrayScaleConversion.Parameters.R", 100);
+			TBGreen.Value = IP.Green = GetRasterSetting("GrayScaleConversion.Parameters.G", 100);
+			TBBlue.Value = IP.Blue = GetRasterSetting("GrayScaleConversion.Parameters.B", 100);
+			TbBright.Value = IP.Brightness = GetRasterSetting("GrayScaleConversion.Parameters.Brightness", 100);
+			TbContrast.Value = IP.Contrast = GetRasterSetting("GrayScaleConversion.Parameters.Contrast", 100);
+			CbThreshold.Checked = IP.UseThreshold = GetRasterSetting("GrayScaleConversion.Parameters.Threshold.Enabled", false);
+			TbThreshold.Value = IP.Threshold = GetRasterSetting("GrayScaleConversion.Parameters.Threshold.Value", 50);
+			TBWhiteClip.Value = IP.WhiteClip = GetRasterSetting("GrayScaleConversion.Parameters.WhiteClip", 5);
 
-			CbDither.SelectedItem = Settings.GetObject("GrayScaleConversion.DitheringOptions.DitheringMode", ImageTransform.DitheringMode.FloydSteinberg);
+			CbDither.SelectedItem = GetRasterSetting("GrayScaleConversion.DitheringOptions.DitheringMode", ImageTransform.DitheringMode.FloydSteinberg);
 
-			CbLineThreshold.Checked = IP.UseLineThreshold = Settings.GetObject("GrayScaleConversion.VectorizeOptions.LineThreshold.Enabled", true);
-			TBLineThreshold.Value = IP.LineThreshold = Settings.GetObject("GrayScaleConversion.VectorizeOptions.LineThreshold.Value", 10);
+			CbLineThreshold.Checked = IP.UseLineThreshold = GetRasterSetting("GrayScaleConversion.VectorizeOptions.LineThreshold.Enabled", true);
+			TBLineThreshold.Value = IP.LineThreshold = GetRasterSetting("GrayScaleConversion.VectorizeOptions.LineThreshold.Value", 10);
 
-			CbCornerThreshold.Checked = IP.UseCornerThreshold = Settings.GetObject("GrayScaleConversion.VectorizeOptions.CornerThreshold.Enabled", true);
-			TBCornerThreshold.Value = IP.CornerThreshold = Settings.GetObject("GrayScaleConversion.VectorizeOptions.CornerThreshold.Value", 110);
+			CbCornerThreshold.Checked = IP.UseCornerThreshold = GetRasterSetting("GrayScaleConversion.VectorizeOptions.CornerThreshold.Enabled", true);
+			TBCornerThreshold.Value = IP.CornerThreshold = GetRasterSetting("GrayScaleConversion.VectorizeOptions.CornerThreshold.Value", 110);
 
 			if (RbLineToLineTracing.Checked && !supportPWM)
 				RbDithering.Checked = true;
+		}
+
+		private T GetRasterSetting<T>(string key, T fallback)
+		{
+			object value;
+			if (editSource?.RasterSettings != null && editSource.RasterSettings.TryGetValue(key, out value) && value is T)
+				return (T)value;
+			return Settings.GetObject(key, fallback);
 		}
 
         private Dictionary<string, object> GetActualSettings()
@@ -528,11 +612,18 @@ namespace LaserGRBL.RasterConverter
 			}
 			else
 			{
-				ImageProcessor.PreviewReady -= OnPreviewReady;
-				ImageProcessor.PreviewBegin -= OnPreviewBegin;
-				ImageProcessor.GenerationComplete -= OnGenerationComplete;
-				if (IP != null) IP.Dispose();
+				ReleaseImageProcessor();
 			}
+		}
+
+		private void ReleaseImageProcessor()
+		{
+			ImageProcessor.PreviewReady -= OnPreviewReady;
+			ImageProcessor.PreviewBegin -= OnPreviewBegin;
+			ImageProcessor.GenerationComplete -= OnGenerationComplete;
+			ImageProcessor processor = IP;
+			IP = null;
+			processor?.Dispose();
 		}
 
 		void CbDirectionsSelectedIndexChanged(object sender, EventArgs e)
@@ -748,6 +839,11 @@ namespace LaserGRBL.RasterConverter
 
 		void BtnCancelClick(object sender, EventArgs e)
 		{
+			if (host != null)
+			{
+				if (!preventClose) FinishEditing();
+				return;
+			}
 			try
 			{
 				ImageProcessor P = IP;

@@ -24,6 +24,7 @@ namespace Tools
         /// Holds the actual project settings
         /// </summary>
         public static List<Dictionary<string, object>> ProjectSettings = new List<Dictionary<string, object>>();
+        internal const string OperationsKey = "JobOperations";
 
         #endregion
 
@@ -56,15 +57,51 @@ namespace Tools
         /// Store project to file
         /// </summary>
         /// <param name="filename">Filepath where project should be stored</param>
-        public static void StoreSettings(string filename)
+        public static void StoreSettings(string filename, LaserGRBL.RasterConverter.ImageProcessor rasterSource = null)
         {
             if (string.IsNullOrEmpty(filename)) return;
 
+            var settings = rasterSource?.RasterSettings == null
+                ? ProjectSettings
+                : new List<Dictionary<string, object>> { GetRasterSettings(rasterSource) };
             using (var fs = new FileStream(filename, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                Formatter.Serialize(fs, ProjectSettings);
+                Formatter.Serialize(fs, settings);
                 fs.Close();
             }
+        }
+
+        internal static void PreserveRasterBeforeAppend(LaserGRBL.RasterConverter.ImageProcessor source)
+        {
+            if (source?.RasterSettings != null && ProjectSettings.Count == 1)
+                ProjectSettings[0] = GetRasterSettings(source);
+        }
+
+        internal static void StoreOperations(string filename, IList<JobOperation> operations)
+        {
+            var entries = new JobOperation.Saved[operations.Count];
+            for (int i = 0; i < entries.Length; i++) entries[i] = new JobOperation.Saved(operations[i]);
+            var settings = new List<Dictionary<string, object>>
+            {
+                new Dictionary<string, object> { { OperationsKey, entries } }
+            };
+            using (var stream = new FileStream(filename, FileMode.Create, FileAccess.Write, FileShare.None))
+                Formatter.Serialize(stream, settings);
+        }
+
+        private static Dictionary<string, object> GetRasterSettings(LaserGRBL.RasterConverter.ImageProcessor source)
+        {
+            var settings = new Dictionary<string, object>(source.RasterSettings);
+            settings.Add("ImageName", Path.ChangeExtension(Path.GetFileName(source.SourceFileName), ".png"));
+            using (var image = new MemoryStream())
+            {
+                source.TrueOriginal.Save(image, System.Drawing.Imaging.ImageFormat.Png);
+                settings.Add("ImageBase64", Convert.ToBase64String(image.ToArray()));
+            }
+            settings.Add(GrblCore.ProjectRasterSizeKey, true);
+            if (source.RasterPasses != null)
+                settings.Add(GrblCore.ProjectRasterPassesKey, source.RasterPasses);
+            return settings;
         }
 
         /// <summary>

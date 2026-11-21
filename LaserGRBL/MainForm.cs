@@ -115,7 +115,7 @@ namespace LaserGRBL
 			Core.IssueDetected += OnIssueDetected;
 
 			PreviewForm.SetCore(Core);
-			ConnectionForm.SetCore(Core);
+			ConnectionForm.SetCore(Core, PreviewForm);
 			JogForm.SetCore(Core);
 
 			GitHub.NewVersion += GitHub_NewVersion;
@@ -196,6 +196,11 @@ namespace LaserGRBL
 			IconsMgr.PrepareMenuItem(MnCuttingTest, "mdi-content-cut");
 			IconsMgr.PrepareMenuItem(MnAccuracyTest, "mdi-details");
 			IconsMgr.PrepareMenuItem(shakeTestToolStripMenuItem, "mdi-pulse");
+			AddCalibrationMenuItems();
+			var homeFirst = new ToolStripMenuItem("Home before first job after connecting") { CheckOnClick = true, Checked = GrblCore.HomeBeforeFirstRun,
+				ToolTipText = "When homing ($22) is enabled, run $H before the first job unless the machine was homed since it connected." };
+			homeFirst.CheckedChanged += (sender, args) => GrblCore.HomeBeforeFirstRun = homeFirst.Checked;
+			MnGrbl.DropDownItems.Insert(MnGrbl.DropDownItems.IndexOf(MnUnlock) + 1, homeFirst);
 			IconsMgr.PrepareMenuItem(autoSizeToolStripMenuItem, "mdi-magnify-scan");
 			IconsMgr.PrepareMenuItem(zoomInToolStripMenuItem, "mdi-magnify-plus-outline");
 			IconsMgr.PrepareMenuItem(zoomOutToolStripMenuItem, "mdi-magnify-minus-outline");
@@ -348,7 +353,7 @@ namespace LaserGRBL
 					}
 					else
 					{
-						if (Core.CanLoadNewFile)
+						if (Core.CanOpenJobFile)
 							Core.OpenFile(filename, false);
 						else
 							MessageBox.Show(Strings.MsgboxCannotOpenFileNow);
@@ -429,6 +434,11 @@ namespace LaserGRBL
 		}
 		void MainFormFormClosing(object sender, FormClosingEventArgs e)
 		{
+			if (PreviewForm.JobEditor is RasterConverter.RasterToLaserForm raster && raster.IsGenerating)
+			{
+				e.Cancel = true;
+				return;
+			}
 			if (Core.InProgram && System.Windows.Forms.MessageBox.Show(Strings.ExitAnyway, Strings.WarnMessageBoxHeader, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != System.Windows.Forms.DialogResult.Yes)
 				e.Cancel = true;
 
@@ -507,7 +517,7 @@ namespace LaserGRBL
 			//MnExportConfig.Enabled = Core.CanImportExport;
 			//MnImportConfig.Enabled = Core.CanImportExport;
 			MnGrblReset.Enabled = Core.CanResetGrbl;
-			MnGenerate.Enabled = Core.CanLoadNewFile;
+			MnGenerate.Enabled = Core.CanOpenJobFile;
 
 			MNEsp8266.Visible = false;// (Settings.GetObject("ComWrapper Protocol", ComWrapper.WrapperType.UsBSerial)) == ComWrapper.WrapperType.LaserWebESP8266;
 
@@ -711,7 +721,7 @@ namespace LaserGRBL
 
 		private void MnAdvancedSave_Click(object sender, EventArgs e)
 		{
-			SaveOptionForm.CreateAndShowDialog(this, Core);
+			SaveOptionForm.Open(this, Core, PreviewForm);
 		}
 
 		private void MnSaveProject_Click(object sender, EventArgs e)
@@ -867,8 +877,8 @@ namespace LaserGRBL
 
 		private void fileToolStripMenuItem_DropDownOpening(object sender, EventArgs e)
 		{
-			MnFileOpen.Enabled = Core.CanLoadNewFile;
-			MnFileAppend.Enabled = Core.CanLoadNewFile;
+			MnFileOpen.Enabled = Core.CanOpenJobFile;
+			MnFileAppend.Enabled = Core.CanOpenJobFile;
 			MnReOpenFile.Enabled = Core.CanReOpenFile;
 		}
 
@@ -1225,6 +1235,36 @@ namespace LaserGRBL
 		private void MnAccuracyTest_Click(object sender, EventArgs e)
 		{
 			Core.OpenFile("LaserGRBL.Generator.SVG.LaserGRBL-accuracy-test-file.svg", false);
+		}
+
+		private void AddCalibrationMenuItems()
+		{
+			int index = MnGenerate.DropDownItems.IndexOf(MnCuttingTest) + 1;
+			MnGenerate.DropDownItems.Insert(index++, new ToolStripMenuItem("Focus test...", null, (sender, args) => GenerateFocusTest()));
+			MnGenerate.DropDownItems.Insert(index++, new ToolStripMenuItem("Line interval test...", null, (sender, args) => GenerateIntervalTest()));
+			MnGenerate.DropDownItems.Add(new ToolStripSeparator());
+			MnGenerate.DropDownItems.Add(new ToolStripMenuItem("Save test result to Material DB...", null, (sender, args) =>
+			{
+				using (var form = new RecordTestResultForm()) form.ShowDialog(this);
+			}));
+		}
+
+		private void GenerateFocusTest()
+		{
+			using (var form = new FocusTestForm())
+				if (form.ShowDialog(this) == DialogResult.OK)
+					Core.LoadedFile.LoadCalibrationPattern("Focus Test", CalibrationPatterns.FocusTest(form.Options));
+		}
+
+		private void GenerateIntervalTest()
+		{
+			using (var form = new IntervalTestForm())
+				if (form.ShowDialog(this) == DialogResult.OK)
+				{
+					var commands = CalibrationPatterns.IntervalTest(form.Options);
+					MaterialTestRecord.Last = CalibrationPatterns.IntervalRecord(form.Options, form.TestTitle);
+					Core.LoadedFile.LoadCalibrationPattern("Line Interval Test", commands);
+				}
 		}
 
 		private void shakeTestToolStripMenuItem_Click(object sender, EventArgs e)

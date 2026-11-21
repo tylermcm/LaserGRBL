@@ -112,17 +112,92 @@ namespace LaserGRBL.RasterConverter
 		}
 
 		ImageProcessor IP;
+		private Button passButton;
+		private PreviewForm host;
 
-		public void ShowDialog(Form parent, ImageProcessor processor)
+		private void AddRasterPassButton()
+		{
+			passButton = new GrblButton { AutoSize = true, Anchor = AnchorStyles.Left };
+			UpdatePassButton();
+			tableLayoutPanel1.Controls.Add(passButton, 0, 0);
+			passButton.Click += (sender, args) =>
+			{
+				decimal maxResolution = Settings.GetObject("Raster Hi-Res", false) ? 50 : 20;
+				var defaults = new JobPass(100, 100, IP.LineDirection, IP.Quality);
+				if (host != null)
+				{
+					var editor = new JobPassEditor(IP.RasterPasses, 1, rasterDefaults: defaults,
+						maxResolution: maxResolution, supportsPower: supportPWM);
+					editor.ApplyRequested += (s, e) =>
+					{
+						IP.RasterPasses = editor.Plan;
+						UpdatePassButton();
+						host.PopJobView();
+					};
+					editor.CancelRequested += (s, e) => host.PopJobView();
+					host.PushJobView(editor, "Job passes");
+					return;
+				}
+				using (var dialog = new JobPassForm(IP.RasterPasses, 1, rasterDefaults: defaults,
+					maxResolution: maxResolution, supportsPower: supportPWM))
+					if (dialog.ShowDialog(this) == DialogResult.OK)
+					{
+						IP.RasterPasses = dialog.Plan;
+						UpdatePassButton();
+					}
+			};
+		}
+
+		private void UpdatePassButton()
+		{
+			passButton.Text = IP.RasterPasses == null ? "Job passes..." : string.Format("Job passes ({0})...", IP.RasterPasses.Count);
+		}
+
+		public void ShowDialog(Form parent, ImageProcessor processor, bool editing = false)
+		{
+			Prepare(processor, editing);
+			ShowDialog(parent);
+			StoreRatioLock(editing);
+		}
+
+		internal void ShowInPreview(PreviewForm preview, ImageProcessor processor, bool editing, Action apply)
+		{
+			host = preview;
+			Prepare(processor, editing);
+			BtnCancel.Click += (sender, args) => host.PopJobView();
+			ApplyRequested += () =>
+			{
+				StoreRatioLock(editing);
+				host.PopJobView();
+				apply();
+			};
+			host.PushJobView(this, Text);
+		}
+
+		private event Action ApplyRequested;
+
+		private void Prepare(ImageProcessor processor, bool editing)
 		{
 			IP = processor;
+			if (IP.SelectedTool == ImageProcessor.Tool.Line2Line || IP.SelectedTool == ImageProcessor.Tool.Dithering)
+				AddRasterPassButton();
 
-			InitImageSize();
+			if (editing || mCore.RestoringRasterSize)
+			{
+				SizeF size = editing ? IP.TargetSize : new SizeF(
+					Settings.GetObject("GrayScaleConversion.Gcode.ImageSize.W", 100F),
+					Settings.GetObject("GrayScaleConversion.Gcode.ImageSize.H", 100F));
+				KeepSizeRatio = false;
+				IISizeW.CurrentValue = size.Width;
+				IISizeH.CurrentValue = size.Height;
+				IP.TargetSize = new SizeF(IISizeW.CurrentValue, IISizeH.CurrentValue);
+			}
+			else InitImageSize();
 
-			IIBorderTracing.CurrentValue = IP.BorderSpeed = Settings.GetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", 1000);
-			IILinearFilling.CurrentValue = IP.MarkSpeed = Settings.GetObject("GrayScaleConversion.Gcode.Speed.Mark", 1000);
+			IIBorderTracing.CurrentValue = IP.BorderSpeed = editing ? IP.BorderSpeed : Settings.GetObject("GrayScaleConversion.VectorizeOptions.BorderSpeed", 1000);
+			IILinearFilling.CurrentValue = IP.MarkSpeed = editing ? IP.MarkSpeed : Settings.GetObject("GrayScaleConversion.Gcode.Speed.Mark", 1000);
 
-			IP.LaserOn = Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.LaserOn", "M3");
+			if (!editing) IP.LaserOn = Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.LaserOn", "M3");
 
 			if (IP.LaserOn == "M3" || !GrblCore.Configuration.LaserMode)
 				CBLaserON.SelectedItem = LaserOptions[0];
@@ -131,20 +206,27 @@ namespace LaserGRBL.RasterConverter
 
 			IP.LaserOff = "M5"; 
 
-			IIMinPower.CurrentValue = IP.MinPower = Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMin", 0);
-			IIMaxPower.CurrentValue = IP.MaxPower = Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMax", (int)GrblCore.Configuration.MaxPWM);
+			IIMinPower.CurrentValue = IP.MinPower = editing ? IP.MinPower : Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMin", 0);
+			IIMaxPower.CurrentValue = IP.MaxPower = editing ? IP.MaxPower : Settings.GetObject("GrayScaleConversion.Gcode.LaserOptions.PowerMax", (int)GrblCore.Configuration.MaxPWM);
 
 			IILinearFilling.Visible = LblLinearFilling.Visible = LblLinearFillingmm.Visible = (IP.SelectedTool == ImageProcessor.Tool.NoProcessing || IP.SelectedTool == ImageProcessor.Tool.Line2Line || IP.SelectedTool == ImageProcessor.Tool.Dithering || (IP.SelectedTool == ImageProcessor.Tool.Vectorize && (IP.FillingDirection != ImageProcessor.Direction.None)));
 			IIBorderTracing.Visible = LblBorderTracing.Visible = LblBorderTracingmm.Visible = (IP.SelectedTool == ImageProcessor.Tool.Vectorize || IP.SelectedTool == ImageProcessor.Tool.Centerline);
 			LblLinearFilling.Text = IP.SelectedTool == ImageProcessor.Tool.Vectorize ? "Filling Speed" : "Engraving Speed";
 
-			IIOffsetX.CurrentValue = IP.TargetOffset.X = Settings.GetObject("GrayScaleConversion.Gcode.Offset.X", 0F);
-			IIOffsetY.CurrentValue = IP.TargetOffset.Y = Settings.GetObject("GrayScaleConversion.Gcode.Offset.Y", 0F);
+			PointF offset = editing ? IP.TargetOffset : new PointF(
+				Settings.GetObject("GrayScaleConversion.Gcode.Offset.X", 0F),
+				Settings.GetObject("GrayScaleConversion.Gcode.Offset.Y", 0F));
+			IIOffsetX.CurrentValue = offset.X;
+			IIOffsetY.CurrentValue = offset.Y;
+			IP.TargetOffset = new PointF(IIOffsetX.CurrentValue, IIOffsetY.CurrentValue);
+			if (editing) BtnCreate.Text = "Apply";
 
 			RefreshPerc();
-			ShowDialog(parent);
+		}
 
-			ratiolock = KeepSizeRatio;
+		private void StoreRatioLock(bool editing)
+		{
+			if (!editing && !mCore.RestoringRasterSize) ratiolock = KeepSizeRatio;
 		}
 
 		private void InitImageSize()
@@ -337,8 +419,22 @@ namespace LaserGRBL.RasterConverter
 
 		private void BtnCreate_Click(object sender, EventArgs e)
 		{
-			if (ConfirmOutOfBoundary())
-				DialogResult = DialogResult.OK;
+			if (passButton != null && IP.RasterPasses != null)
+			{
+				try
+				{
+					for (int i = 0; i < IP.RasterPasses.Count; i++)
+						IP.GetPassPixelSize(IP.RasterPasses[i], i);
+				}
+				catch (InvalidOperationException ex)
+				{
+					MessageBox.Show(this, ex.Message, "Job passes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+					return;
+				}
+			}
+			if (!ConfirmOutOfBoundary()) return;
+			if (host == null) DialogResult = DialogResult.OK;
+			else ApplyRequested?.Invoke();
 		}
 
 		private bool ConfirmOutOfBoundary()

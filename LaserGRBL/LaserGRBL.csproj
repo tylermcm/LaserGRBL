@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -864,6 +864,23 @@
     </Compile>
     <Compile Include="AutoUpdate\GitHub.cs" />
     <Compile Include="Core\GrblCore.cs" />
+    <Compile Include="Core\JobPassPlan.cs" />
+    <Compile Include="Core\JobOperation.cs" />
+    <Compile Include="Core\JobPlacement.cs" />
+    <Compile Include="Core\JobTimeline.cs" />
+    <Compile Include="JobOperationsEditor.cs" />
+    <Compile Include="MaterialForms.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Core\MaterialLibrary.cs" />
+    <Compile Include="Core\CalibrationPatterns.cs" />
+    <Compile Include="Core\KerfCompensation.cs" />
+    <Compile Include="JobPlaybackView.cs" />
+    <Compile Include="JobPlacementView.cs" />
+    <Compile Include="CameraView.cs" />
+    <Compile Include="JobPassForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="CSV\CsvDictionary.cs" />
     <Compile Include="CSV\FormattedMessage.cs" />
     <Compile Include="GrblCommand.cs" />

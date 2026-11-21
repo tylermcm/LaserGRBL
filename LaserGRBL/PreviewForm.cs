@@ -21,11 +21,18 @@ namespace LaserGRBL
     public partial class PreviewForm : System.Windows.Forms.UserControl
 	{
 		private GrblCore mCore;
+		private readonly Panel previewArea;
+		private TableLayoutPanel jobEditorArea;
+		private readonly Stack<TableLayoutPanel> previousViews = new Stack<TableLayoutPanel>();
+		private bool closeOnFileLoad;
+		internal Control JobEditor { get; private set; }
 		public IGrblPanel GrblPanel { private set; get; } = null;
 
 		public PreviewForm()
 		{
 			InitializeComponent();
+			previewArea = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+			tableLayoutPanel1.Controls.Add(previewArea, 0, 0);
             CreatePanel();
             CustomButtonArea.OrderChanged += CustomButtonArea_OrderChanged;
 			IconsMgr.PrepareButton(BtnReset, "custom-reset");
@@ -64,7 +71,7 @@ namespace LaserGRBL
         {
 			if (GrblPanel != null)
             {
-                tableLayoutPanel1.Controls.Remove(GrblPanel as Control);
+                previewArea.Controls.Remove(GrblPanel as Control);
 				(GrblPanel as Control).Dispose();
             }
             if (Settings.RequestedGraphicMode == Settings.GraphicMode.GDI)
@@ -74,8 +81,110 @@ namespace LaserGRBL
 
 			if (mCore != null) GrblPanel.SetCore(mCore);
             (GrblPanel as Control).Dock = DockStyle.Fill;
-            tableLayoutPanel1.Controls.Add(GrblPanel as Control);
+			(GrblPanel as Control).Visible = JobEditor == null;
+            previewArea.Controls.Add(GrblPanel as Control);
         }
+
+		internal void ShowJobEditor(Control editor, string caption, bool showBack = false, bool blocksRun = true, bool closeOnLoad = true)
+		{
+			CloseJobEditor();
+			closeOnFileLoad = blocksRun && closeOnLoad;
+			mCore.JobEditorOpen = blocksRun;
+			PushJobView(editor, caption, showBack);
+		}
+
+		internal void PushJobView(Control editor, string caption, bool showBack = false)
+		{
+			if (jobEditorArea != null)
+			{
+				jobEditorArea.Hide();
+				previousViews.Push(jobEditorArea);
+			}
+			jobEditorArea = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3 };
+			jobEditorArea.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+			jobEditorArea.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			jobEditorArea.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+			jobEditorArea.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+			var jobEditorTitle = new Label { Text = caption, AutoSize = true, Margin = new Padding(12, 10, 8, 0) };
+			var jobEditorStatus = new Label { AutoSize = true, Margin = new Padding(12, 4, 8, 0), Visible = false };
+			editor.Dock = DockStyle.Fill;
+			var header = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Margin = Padding.Empty };
+			if (showBack)
+			{
+				var back = new GrblButton { Text = "Back", AutoSize = true, Margin = new Padding(12, 5, 0, 0) };
+				back.Click += (sender, args) => PopJobView();
+				header.Controls.Add(back);
+			}
+			header.Controls.Add(jobEditorTitle);
+			jobEditorArea.Controls.Add(header, 0, 0);
+			jobEditorArea.Controls.Add(jobEditorStatus, 0, 1);
+			if (editor is Form form)
+			{
+				form.TopLevel = false;
+				form.FormBorderStyle = FormBorderStyle.None;
+				form.MinimumSize = Size.Empty;
+			}
+			jobEditorArea.Controls.Add(editor, 0, 2);
+			previewArea.Controls.Add(jobEditorArea);
+			JobEditor = editor;
+			jobEditorArea.BringToFront();
+			(GrblPanel as Control).Hide();
+			RefreshJobEditorTheme();
+			editor.Show();
+			editor.Focus();
+		}
+
+		internal void SetJobEditorStatus(string message)
+		{
+			if (JobEditor == null) return;
+			var jobEditorStatus = (Label)jobEditorArea.GetControlFromPosition(0, 1);
+			jobEditorStatus.MaximumSize = new Size(Math.Max(100, jobEditorArea.ClientSize.Width - 20), 0);
+			jobEditorStatus.Text = message ?? "";
+			jobEditorStatus.Visible = !string.IsNullOrEmpty(message);
+		}
+
+		internal void CloseJobEditor()
+		{
+			while (previousViews.Count > 0) previousViews.Pop().Dispose();
+			PopJobView();
+		}
+
+		internal void CloseJobEditorOnFileLoad()
+		{
+			if (closeOnFileLoad) CloseJobEditor();
+		}
+
+		internal void PopJobView()
+		{
+			if (jobEditorArea == null) return;
+			previewArea.Controls.Remove(jobEditorArea);
+			jobEditorArea.Dispose();
+			if (previousViews.Count == 0)
+			{
+				JobEditor = null;
+				jobEditorArea = null;
+				mCore.JobEditorOpen = false;
+				(GrblPanel as Control).Show();
+				return;
+			}
+			jobEditorArea = previousViews.Pop();
+			JobEditor = jobEditorArea.GetControlFromPosition(0, 2);
+			jobEditorArea.Show();
+			RefreshJobEditorTheme();
+			JobEditor.Focus();
+		}
+
+		private void RefreshJobEditorTheme()
+		{
+			if (JobEditor == null) return;
+			jobEditorArea.BackColor = ColorScheme.FormBackColor;
+			jobEditorArea.ForeColor = ColorScheme.FormForeColor;
+			(JobEditor as JobPassEditor)?.RefreshTheme();
+			(JobEditor as JobOperationsEditor)?.RefreshTheme();
+			(JobEditor as JobPlaybackView)?.RefreshTheme();
+			(JobEditor as JobPlacementView)?.RefreshTheme();
+			(JobEditor as CameraView)?.RefreshTheme();
+		}
 
         private void CustomButtonArea_OrderChanged(int oldindex, int newindex)
 		{
@@ -550,6 +659,7 @@ namespace LaserGRBL
 		internal void OnColorChange()
 		{
             GrblPanel.OnColorChange();
+			RefreshJobEditorTheme();
 		}
 
 		private void BtnZeroing_Click(object sender, EventArgs e)

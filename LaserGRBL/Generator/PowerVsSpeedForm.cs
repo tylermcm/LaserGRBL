@@ -100,6 +100,7 @@ namespace LaserGRBL.Generator
 		private void BtnCreate_Click(object sender, EventArgs e)
 		{
 			ComboboxItem mode = CBLaserON.SelectedItem as ComboboxItem;
+			MaterialTestRecord.Last = MaterialTestRecord.ForPowerSpeed(Ii_Fsteps.CurrentValue, Ii_Ssteps.CurrentValue, Ii_Fmin.CurrentValue, Ii_Fmax.CurrentValue, Ii_Smin.CurrentValue, Ii_Smax.CurrentValue, (double)UDQuality.Value, PhTbLabel.Text, mode.Value as string);
 			mCore.LoadedFile.GenerateGreyscaleTest(Ii_Fsteps.CurrentValue, Ii_Ssteps.CurrentValue, Ii_Fmin.CurrentValue, Ii_Fmax.CurrentValue, Ii_Smin.CurrentValue, Ii_Smax.CurrentValue, (int)IISizeW.CurrentValue, (int)IISizeH.CurrentValue, (double)UDQuality.Value, Ii_Ftext.CurrentValue, Ii_Stext.CurrentValue, PhTbLabel.Text, Ii_Ftext.CurrentValue, Ii_Stext.CurrentValue, mode.Value as string);
 			Close();
 		}

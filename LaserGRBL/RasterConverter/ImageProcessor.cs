@@ -110,9 +110,13 @@ namespace LaserGRBL.RasterConverter
 			NewInsetFilling,
 		}
 
+		internal JobPassPlan RasterPasses { get; set; }
+		internal Dictionary<string, object> RasterSettings { get; set; }
+
 		public ImageProcessor(GrblCore core, string fileName, Size boxSize, bool append)
 		{
 			mCore = core;
+			RasterPasses = core.ProjectRasterPasses;
 			mFileName = fileName;
 			mAppend = append;
 			mSuspended = true;
@@ -181,9 +185,9 @@ namespace LaserGRBL.RasterConverter
 			if (Current != null)
 				Current.AbortThread();
 
-			mTrueOriginal.Dispose();
-			mOriginal.Dispose();
-			mResized.Dispose();
+			mTrueOriginal?.Dispose();
+			mOriginal?.Dispose();
+			mResized?.Dispose();
 		}
 
 		public void Suspend()
@@ -1014,17 +1018,21 @@ namespace LaserGRBL.RasterConverter
 		{
 			try
 			{
-				int maxSize = Tools.OSHelper.Is64BitProcess ? 22000 * 22000 : 6000 * 7000; //on 32bit OS we have memory limit - allow Higher value on 64bit
+				int maxSize = MaxRasterPixels;
 
 				double filesize = TargetSize.Width * TargetSize.Height;
 				double maxRes = Math.Sqrt(maxSize / filesize); //limit res if resultimg bmp size is to big
+				if (SelectedTool == Tool.Line2Line || SelectedTool == Tool.Dithering)
+				{
+					LoadRasterJob();
+					GenerationComplete?.Invoke(null);
+					return;
+				}
 				double fres = Math.Min(maxRes, (double)FillingQuality);
 
 				double res = 10.0;
 
-				if (SelectedTool == Tool.Line2Line || SelectedTool == Tool.Dithering)
-					res = Math.Min(maxRes, (double)Quality);
-				else if (SelectedTool == Tool.Centerline)
+				if (SelectedTool == Tool.Centerline)
 					res = 10.0;
 				else
 					res = Math.Min(maxRes, GetVectorQuality(filesize, UseAdaptiveQuality));
@@ -1067,7 +1075,7 @@ namespace LaserGRBL.RasterConverter
 						conf.pwm = Settings.GetObject("Support Hardware PWM", true);
 						conf.firmwareType = Settings.GetObject("Firmware Type", Firmware.Grbl);
 
-						if (SelectedTool == Tool.Line2Line || SelectedTool == Tool.Dithering || SelectedTool == Tool.NoProcessing)
+						if (SelectedTool == Tool.NoProcessing)
 							mCore.LoadedFile.LoadImageL2L(bmp, mFileName, conf, mAppend, mCore);
 						else if (SelectedTool == Tool.Vectorize)
 							mCore.LoadedFile.LoadImagePotrace(bmp, mFileName, UseSpotRemoval, (int)SpotRemoval, UseSmoothing, Smoothing, UseOptimize, Optimize, OptimizeFast, conf, mAppend, mCore);
@@ -1090,6 +1098,111 @@ namespace LaserGRBL.RasterConverter
 				if (GenerationComplete != null)
 					GenerationComplete(ex);
 			}
+		}
+
+		private static int MaxRasterPixels { get { return Tools.OSHelper.Is64BitProcess ? 22000 * 22000 : 6000 * 7000; } }
+
+		internal Size GetPassPixelSize(JobPass pass, int index)
+		{
+			double resolution = (double)pass.LinesPerMm;
+			double width = Math.Max(1, Math.Round(TargetSize.Width * resolution));
+			double height = Math.Max(1, Math.Round(TargetSize.Height * resolution));
+			if (TargetSize.Width <= 0 || TargetSize.Height <= 0 || resolution <= 0 || width * height > MaxRasterPixels)
+				throw new InvalidOperationException(string.Format("Pass {0}: lower Lines/mm to fit the selected image size.", index + 1));
+			return new Size((int)width, (int)height);
+		}
+
+		internal string SourceFileName { get { return mFileName; } }
+		internal JobPass DefaultRasterPass { get { return new JobPass(100, 100, LineDirection, Quality); } }
+		internal bool RasterSupportsPower { get; private set; }
+		private Firmware rasterFirmware;
+
+		private void LoadRasterJob()
+		{
+			RasterSupportsPower = Settings.GetObject("Support Hardware PWM", true);
+			rasterFirmware = Settings.GetObject("Firmware Type", Firmware.Grbl);
+			var generated = BuildRasterJob(RasterPasses);
+			ImageProcessor source = null;
+			try
+			{
+				if (!mAppend)
+				{
+					source = CopyRasterSource();
+				}
+				mCore.LoadedFile.LoadRasterPasses(generated, mFileName, mAppend, source);
+			}
+			finally
+			{
+				if (source != mCore.LoadedFile.RasterSource) source?.Dispose();
+			}
+			if (RasterPasses != null) mCore.LoopCount = 1;
+		}
+
+		internal ImageProcessor CopyRasterSource()
+		{
+			var copy = (ImageProcessor)MemberwiseClone();
+			copy.mOriginal = null;
+			copy.mTrueOriginal = copy.mResized = null;
+			copy.Current = null;
+			copy.TH = null;
+			copy.MustExit = null;
+			copy.mCore = null;
+			copy.mSuspended = true;
+			try
+			{
+				copy.mOriginal = (Bitmap)mOriginal.Clone();
+				copy.mTrueOriginal = (Bitmap)mTrueOriginal.Clone();
+				return copy;
+			}
+			catch
+			{
+				copy.Dispose();
+				throw;
+			}
+		}
+
+		internal GrblFile BuildRasterJob(JobPassPlan plan)
+		{
+			var generated = new GrblFile();
+			if (plan == null)
+			{
+				double resolution = Math.Min((double)Quality, Math.Sqrt(MaxRasterPixels / (double)(TargetSize.Width * TargetSize.Height)));
+				var pixels = new Size((int)(TargetSize.Width * resolution), (int)(TargetSize.Height * resolution));
+				if (pixels.Width <= 0 || pixels.Height <= 0)
+					throw new InvalidOperationException("The image is too small for the selected resolution.");
+				var config = CreateRasterConfig(LineDirection);
+				config.res = resolution;
+				using (Bitmap bitmap = CreateTarget(pixels))
+					generated.AppendRasterPath(bitmap, config);
+				generated.Analyze();
+				return generated;
+			}
+			for (int index = 0; index < plan.Count; index++)
+			{
+				JobPass pass = plan[index];
+				using (Bitmap bitmap = CreateTarget(GetPassPixelSize(pass, index)))
+					generated.AppendRasterPass(bitmap, CreateRasterConfig(pass.Direction), TargetSize,
+						new JobPass(RasterSupportsPower ? pass.PowerPercent : 100, pass.SpeedPercent, pass.Direction, pass.LinesPerMm));
+			}
+			generated.Analyze();
+			return generated;
+		}
+
+		private GrblFile.L2LConf CreateRasterConfig(Direction direction)
+		{
+			return new GrblFile.L2LConf
+			{
+				oX = TargetOffset.X,
+				oY = TargetOffset.Y,
+				markSpeed = MarkSpeed,
+				minPower = MinPower,
+				maxPower = MaxPower,
+				lOn = LaserOn,
+				lOff = LaserOff,
+				dir = direction,
+				pwm = RasterSupportsPower,
+				firmwareType = rasterFirmware
+			};
 		}
 
 		private static double GetVectorQuality(double size, bool adaptive)
